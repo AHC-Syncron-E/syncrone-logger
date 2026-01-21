@@ -11,9 +11,10 @@ import serial.tools.list_ports
 
 # GUI Components
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                               QHBoxLayout, QPushButton, QLabel, QFrame, QMessageBox)
+                               QHBoxLayout, QPushButton, QLabel, QFrame, QMessageBox,
+                               QLineEdit, QSpacerItem, QSizePolicy)
 from PySide6.QtCore import Qt, QThread, Signal, Slot
-from PySide6.QtGui import QFont
+from PySide6.QtGui import QFont, QIcon, QColor
 
 # Graphing
 import pyqtgraph as pg
@@ -25,11 +26,14 @@ import pyqtgraph as pg
 class VentilatorWorker(QThread):
     # Signals
     sig_status_update = Signal(str, str)  # status_msg, color_code
+    sig_mode_update = Signal(str)  # New: Updates the "Mode: ..." text
     sig_waveform_data = Signal(float, float)  # pressure (top), flow (bottom)
     sig_error = Signal(str)
 
-    def __init__(self):
+    def __init__(self, patient_id, db_path):
         super().__init__()
+        self.patient_id = patient_id
+        self.db_path = db_path
         self.is_running = False
         self.serial_port = None
 
@@ -64,11 +68,19 @@ class VentilatorWorker(QThread):
                 timeout=1
             )
             self.sig_status_update.emit(f"CONNECTED: {target_com_port}", "#00ff00")  # Green
+
+            # --- 3. Mock Settings Parsing ---
+            # Simulate receiving a settings packet immediately after connection
+            time.sleep(0.5)
+            # In the real app, this string comes from parsing the serial response
+            parsed_mode = "Mode: VC A/C"
+            self.sig_mode_update.emit(parsed_mode)
+
         except serial.SerialException as e:
             self.sig_error.emit(f"Could not open {target_com_port}.\nIs it in use?\nError: {e}")
             return
 
-        # --- 3. Main Loop (Simulate Data & Write Serial) ---
+        # --- 4. Main Loop (Simulate Waveforms & Write Serial) ---
         start_time = time.time()
         last_serial_write = 0
 
@@ -89,11 +101,12 @@ class VentilatorWorker(QThread):
 
                 # B. Write to Serial Port (Every 1.0 second)
                 if current_time - last_serial_write >= 1.0:
-                    msg = f"Hello World - {datetime.now().strftime('%H:%M:%S')}\n"
+                    # Include Patient ID in the serial log for tracking
+                    msg = f"ID:{self.patient_id} - {datetime.now().strftime('%H:%M:%S')}\n"
                     self.serial_port.write(msg.encode('utf-8'))
                     last_serial_write = current_time
 
-                # Control loop speed (approx 25Hz refresh rate)
+                # Control loop speed
                 time.sleep(0.04)
 
         except Exception as e:
@@ -102,6 +115,7 @@ class VentilatorWorker(QThread):
             if self.serial_port and self.serial_port.is_open:
                 self.serial_port.close()
             self.sig_status_update.emit("STOPPED", "#888888")
+            self.sig_mode_update.emit("Mode: --")  # Reset mode on stop
 
     def stop(self):
         self.is_running = False
@@ -116,9 +130,16 @@ class VentilatorApp(QMainWindow):
         super().__init__()
 
         self.setWindowTitle("Syncron-E Clinical Data Logger")
-        self.resize(1000, 700)
+        self.resize(1000, 750)
         self.setStyleSheet("background-color: #1e1e1e; color: #ffffff;")
+
+        # Load Icon (Ensure icon.ico is in the same folder)
+        if Path("icon.ico").exists():
+            self.setWindowIcon(QIcon("icon.ico"))
+
         self.prevent_sleep()
+        self.save_dir = Path.home() / "Documents" / "VentilatorLogs"
+        self.save_dir.mkdir(parents=True, exist_ok=True)
 
         # --- Layout Setup ---
         central_widget = QWidget()
@@ -127,50 +148,87 @@ class VentilatorApp(QMainWindow):
         main_layout.setContentsMargins(20, 20, 20, 20)
         main_layout.setSpacing(15)
 
-        # 1. Header
+        # 1. Header (Status + Mode Display)
         self.header_frame = QFrame()
         self.header_frame.setStyleSheet("background-color: #333; border-radius: 8px;")
         header_layout = QHBoxLayout(self.header_frame)
 
+        # Status Circle & Text
         self.status_indicator = QLabel("●")
         self.status_indicator.setFont(QFont("Arial", 28))
         self.status_indicator.setStyleSheet("color: #888888;")
 
-        self.status_label = QLabel("READY TO CONNECT")
+        self.status_label = QLabel("READY")
         self.status_label.setFont(QFont("Segoe UI", 16, QFont.Bold))
+
+        # Spacer to push Mode to the right
+        spacer = QSpacerItem(40, 20, QSizePolicy.Expanding, QSizePolicy.Minimum)
+
+        # Mode Display (The "Settings" Indicator)
+        self.mode_label = QLabel("Mode: --")
+        self.mode_label.setFont(QFont("Segoe UI", 16, QFont.Bold))
+        self.mode_label.setStyleSheet("color: #00aaff;")  # Light blue to distinguish from status
 
         header_layout.addWidget(self.status_indicator)
         header_layout.addWidget(self.status_label)
-        header_layout.addStretch()
+        header_layout.addItem(spacer)
+        header_layout.addWidget(self.mode_label)
+        header_layout.addSpacing(20)
 
-        # 2. Waveform Graphs (PyQtGraph)
+        # 2. Waveform Graphs
         pg.setConfigOption('background', '#000000')
         pg.setConfigOption('foreground', '#d0d0d0')
         pg.setConfigOptions(antialias=True)
 
         self.plot_widget = pg.GraphicsLayoutWidget()
 
-        # -- Top Plot: Pressure (Cosine) --
+        # Pressure Plot
         self.p_plot = self.plot_widget.addPlot(title="Pressure (cmH2O)")
         self.p_plot.setYRange(0, 40)
         self.p_plot.showGrid(x=True, y=True, alpha=0.3)
-        self.p_curve = self.p_plot.plot(pen=pg.mkPen('#00ff00', width=2))  # Green
+        self.p_curve = self.p_plot.plot(pen=pg.mkPen('#00ff00', width=2))
 
         self.plot_widget.nextRow()
 
-        # -- Bottom Plot: Flow (Sine) --
+        # Flow Plot
         self.f_plot = self.plot_widget.addPlot(title="Flow (L/min)")
         self.f_plot.setYRange(-70, 70)
         self.f_plot.showGrid(x=True, y=True, alpha=0.3)
-        self.f_curve = self.f_plot.plot(pen=pg.mkPen('#ffff00', width=2))  # Yellow
+        self.f_curve = self.f_plot.plot(pen=pg.mkPen('#ffff00', width=2))
 
-        # Data Buffers (Scrolling window)
-        self.data_len = 200  # Number of points to display
+        # Data Buffers
+        self.data_len = 200
         self.pressure_data = [0] * self.data_len
         self.flow_data = [0] * self.data_len
 
-        # 3. Footer Controls
-        footer_layout = QHBoxLayout()
+        # 3. Footer (Patient ID + Controls)
+        footer_layout = QVBoxLayout()
+
+        # Patient ID Input Row
+        id_layout = QHBoxLayout()
+        lbl_id = QLabel("Patient ID / Session Identifier:")
+        lbl_id.setFont(QFont("Segoe UI", 12))
+        lbl_id.setStyleSheet("color: #cccccc;")
+
+        self.input_patient_id = QLineEdit()
+        self.input_patient_id.setPlaceholderText("Enter Identifier (e.g. PT-101)...")
+        self.input_patient_id.setFont(QFont("Segoe UI", 12))
+        self.input_patient_id.setStyleSheet("""
+            QLineEdit { 
+                padding: 5px; 
+                border-radius: 4px; 
+                border: 1px solid #555;
+                background-color: #2b2b2b;
+                color: white;
+            }
+            QLineEdit:focus { border: 1px solid #007acc; }
+        """)
+
+        id_layout.addWidget(lbl_id)
+        id_layout.addWidget(self.input_patient_id)
+
+        # Buttons Row
+        btn_layout = QHBoxLayout()
         self.btn_start = QPushButton("START LOGGING")
         self.btn_start.setMinimumHeight(60)
         self.btn_start.setFont(QFont("Segoe UI", 14, QFont.Bold))
@@ -184,10 +242,14 @@ class VentilatorApp(QMainWindow):
         self.btn_stop.setEnabled(False)
         self.btn_stop.clicked.connect(self.stop_logging)
 
-        footer_layout.addWidget(self.btn_start)
-        footer_layout.addWidget(self.btn_stop)
+        btn_layout.addWidget(self.btn_start)
+        btn_layout.addWidget(self.btn_stop)
 
-        # Add to main layout
+        footer_layout.addLayout(id_layout)
+        footer_layout.addSpacing(10)
+        footer_layout.addLayout(btn_layout)
+
+        # Assemble Main Layout
         main_layout.addWidget(self.header_frame, 1)
         main_layout.addWidget(self.plot_widget, 8)
         main_layout.addLayout(footer_layout, 1)
@@ -199,11 +261,26 @@ class VentilatorApp(QMainWindow):
             pass
 
     def start_logging(self):
+        # 1. Validate Input
+        patient_id = self.input_patient_id.text().strip()
+        if not patient_id:
+            QMessageBox.warning(self, "Input Required", "Please enter a Patient or Session Identifier.")
+            self.input_patient_id.setFocus()
+            return
+
+        # 2. Prepare Session
+        self.input_patient_id.setEnabled(False)  # Lock input while running
         self.btn_start.setEnabled(False)
         self.btn_stop.setEnabled(True)
 
-        self.worker = VentilatorWorker()
+        # Generate Filename with ID
+        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        db_filename = self.save_dir / f"syncrone_{patient_id}_{timestamp}.db"
+
+        # 3. Start Worker
+        self.worker = VentilatorWorker(patient_id, str(db_filename))
         self.worker.sig_status_update.connect(self.update_status)
+        self.worker.sig_mode_update.connect(self.update_mode)  # Connect new signal
         self.worker.sig_waveform_data.connect(self.update_plot)
         self.worker.sig_error.connect(self.handle_error)
         self.worker.start()
@@ -211,21 +288,25 @@ class VentilatorApp(QMainWindow):
     def stop_logging(self):
         if hasattr(self, 'worker'):
             self.worker.stop()
+
+        self.input_patient_id.setEnabled(True)  # Unlock input
         self.btn_start.setEnabled(True)
         self.btn_stop.setEnabled(False)
+        self.mode_label.setText("Mode: --")
 
     @Slot(str, str)
     def update_status(self, msg, color):
         self.status_label.setText(msg)
         self.status_indicator.setStyleSheet(f"color: {color};")
 
+    @Slot(str)
+    def update_mode(self, mode_text):
+        self.mode_label.setText(mode_text)
+
     @Slot(float, float)
     def update_plot(self, pressure, flow):
-        # Update buffers (Scroll left)
         self.pressure_data = self.pressure_data[1:] + [pressure]
         self.flow_data = self.flow_data[1:] + [flow]
-
-        # Redraw lines
         self.p_curve.setData(self.pressure_data)
         self.f_curve.setData(self.flow_data)
 
