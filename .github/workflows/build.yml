@@ -27,8 +27,7 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install nuitka zstandard
-          # Install your project dependencies
-          pip install pyside6 numpy pyqtgraph qdarktheme
+          pip install pyside6 numpy pyqtgraph pyserial
 
       # --- 2. Setup Build Tools ---
       - name: Download Resource Hacker
