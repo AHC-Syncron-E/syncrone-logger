@@ -1,0 +1,19 @@
+# Build Artifacts
+*.dist/
+*.build/
+*.onefile-build/
+*.exe
+*.zip
+
+# Secrets & Config
+metadata.json  # Prevent accidental secret leaks (we will generate it in CI)
+local_secrets.ps1
+
+# Tools (We will download these in CI)
+ResourceHacker.exe
+ResourceHacker.ini
+SigningTools/
+__pycache__/
+
+# DLLs (Nuitka finds these automatically)
+*.dll
