@@ -1,26 +1,99 @@
-nuitka --onefile --standalone --enable-plugin=pyside6 --windows-disable-console main.py
+# Syncron-E Clinical Data Logger
+
+**Syncron-E Clinical Data Logger** is a PySide6-based application for logging clinical data from PB 980 ventilators. It is packaged as a self-extracting executable designed for restricted hospital IT environments (Windows 10/11).
+
+![License](https://img.shields.io/badge/license-Proprietary-red)
+![Platform](https://img.shields.io/badge/platform-Windows_x64-blue)
+
+## 🚀 Quick Start (For Users)
+1. Download `Syncron-E CD Logger.exe` from the **Releases** tab.
+2. Double-click to run.
+   * *Note:* No Administrator privileges are required.
+   * *Note:* The app extracts momentarily (displaying a progress bar) before launching.
+
+---
+
+## 🛠️ Development Setup
+
+### Prerequisites
+* **Windows 10/11**
+* **Python 3.13** (Anaconda recommended)
+* **7-Zip** (Installed in default path)
+* **Visual C++ Redistributable** (Latest x64)
+
+### Installation
+1. Clone the repository:
+    ```bash
+    git clone [https://github.com/AutonomousHealthcare/syncrone-logger.git](https://github.com/AutonomousHealthcare/syncrone-logger.git)
+    cd syncrone-logger
+    
+    ```
+
+2. Create the environment:
+    ```bash
+    conda env create -f environment.yml
+    conda activate syncrone-logger
+    
+    ```
 
 
-nuitka --onefile --standalone --enable-plugin=pyside6 --include-module=PySide6.QtOpenGL --include-module=PySide6.QtOpenGLWidgets --windows-icon-from-ico=icon.ico --include-data-file="C:\Users\tsphan-g6\PycharmProjects\syncrone-logger\vcruntime140.dll=vcruntime140.dll" --include-data-file="C:\Users\tsphan-g6\PycharmProjects\syncrone-logger\msvcp140.dll=msvcp140.dll" --include-data-file="C:\Users\tsphan-g6\PycharmProjects\syncrone-logger\vcruntime140_1.dll=vcruntime140_1.dll" main.py
+3. Run locally:
+    ```bash
+    python main.py
+    
+    ```
 
-nuitka --onefile --standalone --enable-plugin=pyside6 --include-module=PySide6.QtOpenGL --include-module=PySide6.QtOpenGLWidgets --windows-icon-from-ico=icon.ico --windows-disable-console --include-data-file="vcruntime140_1.dll=vcruntime140_1.dll" main.py
 
 
-$env:AZURE_CLIENT_SECRET = "0s.8Q~vCfT12PJ8HV08Lot9BY6nXAzOQjq2Pka_e"
-$env:AZURE_TENANT_ID = "4db11efe-d3c7-455c-a10e-9ff4a40c6e01"
-$env:AZURE_CLIENT_ID = "7b724bf7-7f63-491b-81cc-96fecedb206b"
+---
 
-syncrone-logger/
-├── 7zSD.sfx
-├── README.md
-├── ResourceHacker.exe
-├── ResourceHacker.ini
-├── build_installer.ps1
-├── icon.ico
-├── metadata.json
-├── msvcp140.dll
-├── package_sfx.bat
-├── patch_uac.py
-├── setup_signing.ps1
-├── vcruntime140.dll
-└── vcruntime140_1.dll
+## 📦 Build & Release
+
+We use a 3-stage build process to ensure reliability on "Fresh" Windows installs.
+
+### 1. Compile (Nuitka)
+
+Compiles Python to a standalone folder (`main.dist`) containing all DLLs.
+
+```powershell
+# Run Nuitka manually or via CI
+python -m nuitka --standalone `
+  --enable-plugin=pyside6 `
+  --include-module=PySide6.QtOpenGL `
+  --include-module=PySide6.QtOpenGLWidgets `
+  --windows-icon-from-ico=icon.ico `
+  --windows-console-mode=disable `
+  main.py
+
+```
+
+### 2. Package (SFX)
+
+Wraps the `main.dist` folder into a single `.exe` using 7-Zip SFX and fixes UAC permissions.
+
+```powershell
+.\build_installer.ps1
+
+```
+
+* **Requires:** `7zSD.sfx`, `ResourceHacker.exe`, `icon.ico`.
+* **Output:** `Syncron-E CD Logger.exe`
+
+### 3. Sign (Azure)
+
+Signs the binary for Windows security trust.
+
+* **Local:** Use `setup_signing.ps1` to download tools, then run `signtool`.
+* **CI:** Handled automatically by GitHub Actions.
+
+---
+
+## ✅ TODO / Status
+
+* [x] Create Non-Admin Self-Extracting Archive
+* [x] Implement Azure Trusted Signing
+* [ ] Wwaveform parsing and plotting
+* [ ] Settings request, parsing, and displaying ventilation mode
+* [ ] Auto-detection of waveform cable and settings cable
+* [ ] Dedicated folder for 1-hr EDF file dump at 5-minute update intervals
+* [ ] SQLite database for continuous storage of waveform and settings payloads

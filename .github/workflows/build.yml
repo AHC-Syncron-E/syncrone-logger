@@ -1,0 +1,84 @@
+name: Build & Sign Syncron-E
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:  # Allows manual triggering
+
+permissions:
+  contents: read
+  id-token: write     # Required for Azure Signing
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # --- 1. Setup Environment ---
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          pip install nuitka zstandard
+          # If using conda environment.yml, you might use: conda env update --file environment.yml
+          # For simplicity here, assuming pip requirements or install manually:
+          pip install pyside6 numpy pyqtgraph qdarktheme
+
+      # --- 2. Setup Build Tools ---
+      - name: Download Resource Hacker
+        run: |
+          # We download Resource Hacker automatically so we don't commit the EXE
+          Invoke-WebRequest -Uri "http://www.angusj.com/resourcehacker/resource_hacker.zip" -OutFile "rh.zip"
+          Expand-Archive -Path "rh.zip" -DestinationPath "." -Force
+          Rename-Item "Resource Hacker.exe" "ResourceHacker.exe"
+
+      # --- 3. Compile with Nuitka ---
+      - name: Compile Standalone (Main.dist)
+        run: |
+          python -m nuitka --standalone `
+            --enable-plugin=pyside6 `
+            --enable-plugin=numpy `
+            --include-module=PySide6.QtOpenGL `
+            --include-module=PySide6.QtOpenGLWidgets `
+            --windows-icon-from-ico=icon.ico `
+            --windows-console-mode=disable `
+            --company-name="Autonomous Healthcare Inc." `
+            --product-name="Syncron-E" `
+            --file-version="1.0.0.0" `
+            --product-version="1.0.0.0" `
+            main.py
+
+      # --- 4. Package SFX (Using your script) ---
+      - name: Create Installer (SFX)
+        run: |
+          # The Github Runner puts 7-zip in a standard path, ensuring script finds it
+          .\build_installer.ps1
+
+      # --- 5. Sign the Installer ---
+      - name: Azure Trusted Signing
+        uses: azure/trusted-signing-action@v0.4.0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_CODE_SIGNING_NAME }}
+          certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE_NAME }}
+          files-folder: .
+          files-folder-filter: "Syncron-E CD Logger.exe"
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: sha256
+
+      # --- 6. Upload Artifact ---
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Syncron-E-Installer
+          path: "Syncron-E CD Logger.exe"
