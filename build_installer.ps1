@@ -2,6 +2,9 @@ Write-Host "=== STARTING SYNCRONE-E BUILD PROCESS (SPACES + ICON FIX) ===" -Fore
 
 # --- CONFIGURATION ---
 $7z = "C:\Program Files\7-Zip\7z.exe"
+if (-not (Test-Path $7z)) {
+    $7z = "7z" # Fallback to PATH
+}
 $ResHacker = ".\ResourceHacker.exe"
 $SfxModule = ".\7zSD.sfx"
 $IconFile = ".\icon.ico"

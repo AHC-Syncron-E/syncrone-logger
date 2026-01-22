@@ -26,7 +26,7 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install nuitka zstandard
-          # Updated to match your environment.yml
+          # Installing exactly what is needed for the build
           pip install pyside6 numpy pyqtgraph pyserial
 
       # --- 2. Compile with Nuitka ---
@@ -35,7 +35,6 @@ jobs:
           python -m nuitka --standalone `
             --assume-yes-for-downloads `
             --enable-plugin=pyside6 `
-            --enable-plugin=numpy `
             --include-module=PySide6.QtOpenGL `
             --include-module=PySide6.QtOpenGLWidgets `
             --windows-icon-from-ico=icon.ico `
@@ -49,6 +48,8 @@ jobs:
       # --- 3. Package SFX ---
       - name: Create Installer (SFX)
         run: |
+          # 7-Zip is generally in the PATH on Windows runners, but we use your script's logic.
+          # Ensure 7zSD.sfx is committed to the repo!
           .\build_installer.ps1
 
       # --- 4. Sign the Installer ---
