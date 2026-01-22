@@ -56,7 +56,17 @@ if ($procIcon.ExitCode -ne 0) { Write-Error "Failed to add Icon."; exit }
 
 # --- STEP 3: CONFIGURATION (UTF-8 NO BOM) ---
 Write-Host "3. Creating SFX Config..." -ForegroundColor Yellow
-$configContent = ";!@Install@!UTF-8!`r`nTitle=`"Syncron-E CD Logger`"`r`nProgress=`"yes`"`r`nRunProgram=`"main.exe`"`r`n;!@InstallEnd@!`r`n"
+# "InstallPath" sets the extraction folder.
+# We use %LOCALAPPDATA%, which resolves to C:\Users\Username\AppData\Local.
+# This folder is usually writable by standard users and permitted by AppLocker.
+$configContent = @"
+;!@Install@!UTF-8!
+Title="Syncron-E CD Logger"
+Progress="yes"
+InstallPath="%LOCALAPPDATA%\\Syncron-E_Logger"
+RunProgram="main.exe"
+;!@InstallEnd@!
+"@
 $utf8NoBom = New-Object System.Text.UTF8Encoding $false
 [System.IO.File]::WriteAllText("$PWD\config.txt", $configContent, $utf8NoBom)
 

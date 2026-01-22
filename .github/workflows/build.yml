@@ -45,6 +45,23 @@ jobs:
             --product-version="1.0.0.0" `
             main.py
 
+      # --- 2.5. Sign the Inner Executable (main.exe) ---
+      # Crucial: This must happen BEFORE packaging into SFX
+      - name: Sign Inner Main.exe
+        uses: azure/artifact-signing-action@v1
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_CODE_SIGNING_NAME }}
+          certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE_NAME }}
+          files-folder: main.dist
+          files-folder-filter: "main.exe"
+          file-digest: sha256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: sha256
+
       # --- 3. Package SFX ---
       - name: Create Installer (SFX)
         run: |
@@ -52,8 +69,8 @@ jobs:
           # Ensure 7zSD.sfx is committed to the repo!
           .\build_installer.ps1
 
-      # --- 4. Sign the Installer ---
-      - name: Azure Artifact Signing
+      # --- 4. Sign the Final Installer ---
+      - name: Sign Outer Installer (SFX)
         uses: azure/artifact-signing-action@v1
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}

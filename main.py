@@ -26,7 +26,7 @@ import pyqtgraph as pg
 class VentilatorWorker(QThread):
     # Signals
     sig_status_update = Signal(str, str)  # status_msg, color_code
-    sig_mode_update = Signal(str)  # New: Updates the "Mode: ..." text
+    sig_mode_update = Signal(str)  # Updates the "Mode" or "Received Msg" text
     sig_waveform_data = Signal(float, float)  # pressure (top), flow (bottom)
     sig_error = Signal(str)
 
@@ -36,6 +36,7 @@ class VentilatorWorker(QThread):
         self.db_path = db_path
         self.is_running = False
         self.serial_port = None
+        self.read_buffer = ""  # Buffer for incoming serial data
 
         # Target Device Identity (FTDI)
         self.TARGET_VID = 0x0403
@@ -58,6 +59,7 @@ class VentilatorWorker(QThread):
 
         if not target_com_port:
             self.sig_error.emit("Syncron-E Cable (FTDI) not found!\nPlease check USB connection.")
+            self.sig_status_update.emit("Syncron-E Cable (FTDI) not found!", "#ffff00")
             return
 
         # --- 2. Connect ---
@@ -65,49 +67,74 @@ class VentilatorWorker(QThread):
             self.serial_port = serial.Serial(
                 port=target_com_port,
                 baudrate=9600,
-                timeout=1
+                timeout=0  # Non-blocking read
             )
             self.sig_status_update.emit(f"CONNECTED: {target_com_port}", "#00ff00")  # Green
-
-            # --- 3. Mock Settings Parsing ---
-            # Simulate receiving a settings packet immediately after connection
-            time.sleep(0.5)
-            # In the real app, this string comes from parsing the serial response
-            parsed_mode = "Mode: VC A/C"
-            self.sig_mode_update.emit(parsed_mode)
 
         except serial.SerialException as e:
             self.sig_error.emit(f"Could not open {target_com_port}.\nIs it in use?\nError: {e}")
             return
 
-        # --- 4. Main Loop (Simulate Waveforms & Write Serial) ---
-        start_time = time.time()
-        last_serial_write = 0
+        # --- 3. Main Loop Setup (Metronome & Monotonic Time) ---
+        # Use monotonic time for robust duration calculation
+        start_time = time.monotonic()
+        last_serial_write = start_time
+
+        # Metronome settings
+        loop_interval = 0.04  # 25 Hz target
+        next_wake_time = time.monotonic() + loop_interval
 
         try:
             while self.is_running:
-                current_time = time.time()
-                elapsed = current_time - start_time
+                now = time.monotonic()
+                elapsed = now - start_time
 
                 # A. Generate Dummy Waveforms
-                # Top: Cosine (Simulating Pressure 0-30)
                 pressure = 15 + 15 * math.cos(elapsed * 2)
-
-                # Bottom: Sine (Simulating Flow -60 to 60)
                 flow = 60 * math.sin(elapsed * 2)
-
-                # Send to GUI (High frequency: ~25Hz)
                 self.sig_waveform_data.emit(pressure, flow)
 
                 # B. Write to Serial Port (Every 1.0 second)
-                if current_time - last_serial_write >= 1.0:
-                    # Include Patient ID in the serial log for tracking
+                if now - last_serial_write >= 1.0:
                     msg = f"ID:{self.patient_id} - {datetime.now().strftime('%H:%M:%S')}\n"
                     self.serial_port.write(msg.encode('utf-8'))
-                    last_serial_write = current_time
+                    last_serial_write = now
 
-                # Control loop speed
-                time.sleep(0.04)
+                # C. Read from Serial Port (Check for incoming messages)
+                if self.serial_port.in_waiting > 0:
+                    try:
+                        # Read available bytes and decode
+                        chunk = self.serial_port.read(self.serial_port.in_waiting).decode('utf-8', errors='ignore')
+                        self.read_buffer += chunk
+
+                        # If we have a newline, we have a complete message
+                        if '\n' in self.read_buffer:
+                            lines = self.read_buffer.split('\n')
+                            # Take the last complete line as the status update
+                            # (lines[-1] is the incomplete part for the next loop)
+                            if len(lines) > 1:
+                                latest_msg = lines[-2].strip()
+                                if latest_msg:
+                                    self.sig_mode_update.emit(latest_msg)
+
+                            # Keep the remaining incomplete part in the buffer
+                            self.read_buffer = lines[-1]
+                    except Exception as e:
+                        print(f"Serial Read Error: {e}")
+
+                # D. Metronome Sleep Logic
+                # Calculate how much time remains until the next scheduled tick
+                sleep_duration = next_wake_time - time.monotonic()
+
+                if sleep_duration > 0:
+                    time.sleep(sleep_duration)
+                else:
+                    # If we are lagging behind (processing took too long),
+                    # reset the metronome to avoid a burst of rapid loops to catch up.
+                    next_wake_time = time.monotonic()
+
+                # Schedule next tick
+                next_wake_time += loop_interval
 
         except Exception as e:
             self.sig_error.emit(f"Runtime Error: {e}")
@@ -115,7 +142,7 @@ class VentilatorWorker(QThread):
             if self.serial_port and self.serial_port.is_open:
                 self.serial_port.close()
             self.sig_status_update.emit("STOPPED", "#888888")
-            self.sig_mode_update.emit("Mode: --")  # Reset mode on stop
+            self.sig_mode_update.emit("Mode: --")
 
     def stop(self):
         self.is_running = False
@@ -133,7 +160,15 @@ class VentilatorApp(QMainWindow):
         self.resize(1000, 750)
         self.setStyleSheet("background-color: #1e1e1e; color: #ffffff;")
 
-        # Load Icon (Ensure icon.ico is in the same folder)
+        # Internal State
+        self.is_logging = False
+
+        # Styles for the merged button
+        self.STYLE_BTN_START = "background-color: #007acc; border-radius: 5px; color: white;"
+        self.STYLE_BTN_STOP = "background-color: #cc3300; border-radius: 5px; color: white;"
+        self.STYLE_BTN_DISABLED = "background-color: #444444; border-radius: 5px; color: #888888;"
+
+        # Load Icon
         if Path("icon.ico").exists():
             self.setWindowIcon(QIcon("icon.ico"))
 
@@ -148,12 +183,11 @@ class VentilatorApp(QMainWindow):
         main_layout.setContentsMargins(20, 20, 20, 20)
         main_layout.setSpacing(15)
 
-        # 1. Header (Status + Mode Display)
+        # 1. Header (Status + Received Msg Display)
         self.header_frame = QFrame()
         self.header_frame.setStyleSheet("background-color: #333; border-radius: 8px;")
         header_layout = QHBoxLayout(self.header_frame)
 
-        # Status Circle & Text
         self.status_indicator = QLabel("●")
         self.status_indicator.setFont(QFont("Arial", 28))
         self.status_indicator.setStyleSheet("color: #888888;")
@@ -161,13 +195,12 @@ class VentilatorApp(QMainWindow):
         self.status_label = QLabel("READY")
         self.status_label.setFont(QFont("Segoe UI", 16, QFont.Bold))
 
-        # Spacer to push Mode to the right
         spacer = QSpacerItem(40, 20, QSizePolicy.Expanding, QSizePolicy.Minimum)
 
-        # Mode Display (The "Settings" Indicator)
+        # Label for Incoming Serial Messages (formerly Mode)
         self.mode_label = QLabel("Mode: --")
         self.mode_label.setFont(QFont("Segoe UI", 16, QFont.Bold))
-        self.mode_label.setStyleSheet("color: #00aaff;")  # Light blue to distinguish from status
+        self.mode_label.setStyleSheet("color: #00aaff;")
 
         header_layout.addWidget(self.status_indicator)
         header_layout.addWidget(self.status_label)
@@ -182,7 +215,6 @@ class VentilatorApp(QMainWindow):
 
         self.plot_widget = pg.GraphicsLayoutWidget()
 
-        # Pressure Plot
         self.p_plot = self.plot_widget.addPlot(title="Pressure (cmH2O)")
         self.p_plot.setYRange(0, 40)
         self.p_plot.showGrid(x=True, y=True, alpha=0.3)
@@ -190,13 +222,11 @@ class VentilatorApp(QMainWindow):
 
         self.plot_widget.nextRow()
 
-        # Flow Plot
         self.f_plot = self.plot_widget.addPlot(title="Flow (L/min)")
         self.f_plot.setYRange(-70, 70)
         self.f_plot.showGrid(x=True, y=True, alpha=0.3)
         self.f_curve = self.f_plot.plot(pen=pg.mkPen('#ffff00', width=2))
 
-        # Data Buffers
         self.data_len = 200
         self.pressure_data = [0] * self.data_len
         self.flow_data = [0] * self.data_len
@@ -204,7 +234,6 @@ class VentilatorApp(QMainWindow):
         # 3. Footer (Patient ID + Controls)
         footer_layout = QVBoxLayout()
 
-        # Patient ID Input Row
         id_layout = QHBoxLayout()
         lbl_id = QLabel("Patient ID / Session Identifier:")
         lbl_id.setFont(QFont("Segoe UI", 12))
@@ -223,33 +252,23 @@ class VentilatorApp(QMainWindow):
             }
             QLineEdit:focus { border: 1px solid #007acc; }
         """)
+        self.input_patient_id.textChanged.connect(self.check_input_validity)
 
         id_layout.addWidget(lbl_id)
         id_layout.addWidget(self.input_patient_id)
 
-        # Buttons Row
-        btn_layout = QHBoxLayout()
-        self.btn_start = QPushButton("START LOGGING")
-        self.btn_start.setMinimumHeight(60)
-        self.btn_start.setFont(QFont("Segoe UI", 14, QFont.Bold))
-        self.btn_start.setStyleSheet("background-color: #007acc; border-radius: 5px;")
-        self.btn_start.clicked.connect(self.start_logging)
+        self.btn_action = QPushButton("START LOGGING")
+        self.btn_action.setMinimumHeight(60)
+        self.btn_action.setFont(QFont("Segoe UI", 14, QFont.Bold))
+        self.btn_action.clicked.connect(self.toggle_logging)
 
-        self.btn_stop = QPushButton("STOP")
-        self.btn_stop.setMinimumHeight(60)
-        self.btn_stop.setFont(QFont("Segoe UI", 14, QFont.Bold))
-        self.btn_stop.setStyleSheet("background-color: #cc3300; border-radius: 5px;")
-        self.btn_stop.setEnabled(False)
-        self.btn_stop.clicked.connect(self.stop_logging)
-
-        btn_layout.addWidget(self.btn_start)
-        btn_layout.addWidget(self.btn_stop)
+        self.btn_action.setEnabled(False)
+        self.btn_action.setStyleSheet(self.STYLE_BTN_DISABLED)
 
         footer_layout.addLayout(id_layout)
         footer_layout.addSpacing(10)
-        footer_layout.addLayout(btn_layout)
+        footer_layout.addWidget(self.btn_action)
 
-        # Assemble Main Layout
         main_layout.addWidget(self.header_frame, 1)
         main_layout.addWidget(self.plot_widget, 8)
         main_layout.addLayout(footer_layout, 1)
@@ -260,27 +279,40 @@ class VentilatorApp(QMainWindow):
         except:
             pass
 
-    def start_logging(self):
-        # 1. Validate Input
-        patient_id = self.input_patient_id.text().strip()
-        if not patient_id:
-            QMessageBox.warning(self, "Input Required", "Please enter a Patient or Session Identifier.")
-            self.input_patient_id.setFocus()
+    def check_input_validity(self):
+        if self.is_logging:
             return
 
-        # 2. Prepare Session
-        self.input_patient_id.setEnabled(False)  # Lock input while running
-        self.btn_start.setEnabled(False)
-        self.btn_stop.setEnabled(True)
+        patient_id = self.input_patient_id.text().strip()
+        if patient_id:
+            self.btn_action.setEnabled(True)
+            self.btn_action.setStyleSheet(self.STYLE_BTN_START)
+        else:
+            self.btn_action.setEnabled(False)
+            self.btn_action.setStyleSheet(self.STYLE_BTN_DISABLED)
 
-        # Generate Filename with ID
+    def toggle_logging(self):
+        if not self.is_logging:
+            self.start_logging()
+        else:
+            self.stop_logging()
+
+    def start_logging(self):
+        patient_id = self.input_patient_id.text().strip()
+        if not patient_id:
+            return
+
+        self.is_logging = True
+        self.input_patient_id.setEnabled(False)
+        self.btn_action.setText("STOP")
+        self.btn_action.setStyleSheet(self.STYLE_BTN_STOP)
+
         timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
         db_filename = self.save_dir / f"syncrone_{patient_id}_{timestamp}.db"
 
-        # 3. Start Worker
         self.worker = VentilatorWorker(patient_id, str(db_filename))
         self.worker.sig_status_update.connect(self.update_status)
-        self.worker.sig_mode_update.connect(self.update_mode)  # Connect new signal
+        self.worker.sig_mode_update.connect(self.update_mode)
         self.worker.sig_waveform_data.connect(self.update_plot)
         self.worker.sig_error.connect(self.handle_error)
         self.worker.start()
@@ -289,10 +321,12 @@ class VentilatorApp(QMainWindow):
         if hasattr(self, 'worker'):
             self.worker.stop()
 
-        self.input_patient_id.setEnabled(True)  # Unlock input
-        self.btn_start.setEnabled(True)
-        self.btn_stop.setEnabled(False)
+        self.is_logging = False
+        self.input_patient_id.setEnabled(True)
         self.mode_label.setText("Mode: --")
+
+        self.btn_action.setText("START LOGGING")
+        self.check_input_validity()
 
     @Slot(str, str)
     def update_status(self, msg, color):
@@ -301,6 +335,7 @@ class VentilatorApp(QMainWindow):
 
     @Slot(str)
     def update_mode(self, mode_text):
+        # Displays received serial messages
         self.mode_label.setText(mode_text)
 
     @Slot(float, float)
