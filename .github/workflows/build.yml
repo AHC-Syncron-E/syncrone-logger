@@ -3,11 +3,11 @@ name: Build & Sign Syncron-E
 on:
   push:
     branches: [ "main" ]
-  workflow_dispatch:  # Allows manual triggering
+  workflow_dispatch:
 
 permissions:
   contents: read
-  id-token: write     # Required for Azure Signing
+  id-token: write
 
 jobs:
   build:
@@ -27,14 +27,12 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install nuitka zstandard
-          # If using conda environment.yml, you might use: conda env update --file environment.yml
-          # For simplicity here, assuming pip requirements or install manually:
+          # Install your project dependencies
           pip install pyside6 numpy pyqtgraph qdarktheme
 
       # --- 2. Setup Build Tools ---
       - name: Download Resource Hacker
         run: |
-          # We download Resource Hacker automatically so we don't commit the EXE
           Invoke-WebRequest -Uri "http://www.angusj.com/resourcehacker/resource_hacker.zip" -OutFile "rh.zip"
           Expand-Archive -Path "rh.zip" -DestinationPath "." -Force
           Rename-Item "Resource Hacker.exe" "ResourceHacker.exe"
@@ -55,24 +53,24 @@ jobs:
             --product-version="1.0.0.0" `
             main.py
 
-      # --- 4. Package SFX (Using your script) ---
+      # --- 4. Package SFX ---
       - name: Create Installer (SFX)
         run: |
-          # The Github Runner puts 7-zip in a standard path, ensuring script finds it
           .\build_installer.ps1
 
-      # --- 5. Sign the Installer ---
-      - name: Azure Trusted Signing
-        uses: azure/trusted-signing-action@v0.4.0
+      # --- 5. Sign the Installer (UPDATED) ---
+      - name: Azure Artifact Signing
+        uses: azure/artifact-signing-action@v1
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
           azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
           azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
           endpoint: ${{ secrets.AZURE_ENDPOINT }}
-          trusted-signing-account-name: ${{ secrets.AZURE_CODE_SIGNING_NAME }}
+          signing-account-name: ${{ secrets.AZURE_CODE_SIGNING_NAME }}
           certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE_NAME }}
           files-folder: .
           files-folder-filter: "Syncron-E CD Logger.exe"
+          file-digest: sha256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: sha256
 
