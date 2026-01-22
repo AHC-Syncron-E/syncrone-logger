@@ -33,6 +33,7 @@ jobs:
       - name: Compile Standalone (Main.dist)
         run: |
           python -m nuitka --standalone `
+            --assume-yes-for-downloads `
             --enable-plugin=pyside6 `
             --enable-plugin=numpy `
             --include-module=PySide6.QtOpenGL `
