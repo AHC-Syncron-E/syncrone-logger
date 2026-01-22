@@ -22,21 +22,14 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.13'
-          # cache: 'pip'
 
       - name: Install Dependencies
         run: |
           pip install nuitka zstandard
+          # Updated to match your environment.yml
           pip install pyside6 numpy pyqtgraph pyserial
 
-      # --- 2. Setup Build Tools ---
-      - name: Download Resource Hacker
-        run: |
-          Invoke-WebRequest -Uri "http://www.angusj.com/resourcehacker/resource_hacker.zip" -OutFile "rh.zip"
-          Expand-Archive -Path "rh.zip" -DestinationPath "." -Force
-          Rename-Item "Resource Hacker.exe" "ResourceHacker.exe"
-
-      # --- 3. Compile with Nuitka ---
+      # --- 2. Compile with Nuitka ---
       - name: Compile Standalone (Main.dist)
         run: |
           python -m nuitka --standalone `
@@ -52,12 +45,12 @@ jobs:
             --product-version="1.0.0.0" `
             main.py
 
-      # --- 4. Package SFX ---
+      # --- 3. Package SFX ---
       - name: Create Installer (SFX)
         run: |
           .\build_installer.ps1
 
-      # --- 5. Sign the Installer (UPDATED) ---
+      # --- 4. Sign the Installer ---
       - name: Azure Artifact Signing
         uses: azure/artifact-signing-action@v1
         with:
@@ -73,7 +66,7 @@ jobs:
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: sha256
 
-      # --- 6. Upload Artifact ---
+      # --- 5. Upload Artifact ---
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
