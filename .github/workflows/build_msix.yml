@@ -67,8 +67,8 @@ jobs:
           endpoint: ${{ secrets.AZURE_ENDPOINT }}
           signing-account-name: ${{ secrets.AZURE_CODE_SIGNING_NAME }}
           certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE_NAME }}
-          # Target the folder containing your loose files
-          files-folder: main.dist
+          # CORRECTED: Target 'payload' because we renamed main.dist in the previous step
+          files-folder: payload
           # Recursively match all binary extensions
           files-folder-filter: "*.exe,*.dll,*.pyd"
           file-digest: sha256
