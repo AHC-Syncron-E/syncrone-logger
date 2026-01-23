@@ -294,8 +294,10 @@ class VentilatorWorker(QThread):
                 visual_flow = 60 * math.sin(elapsed * 2)
 
                 # 3. Read & Process
+                # IMPORTANT: We use latin-1 to safely handle all byte values (0-255)
+                # This prevents crashes if the medical device sends special control chars
                 if self.port_a.in_waiting > 0:
-                    data_a = self.port_a.read(self.port_a.in_waiting).decode('utf-8', errors='ignore')
+                    data_a = self.port_a.read(self.port_a.in_waiting).decode('latin-1', errors='ignore')
                     if not ports_identified:
                         self.buffer_a += data_a
                         if self.waveform_pattern.search(self.buffer_a):
@@ -308,7 +310,7 @@ class VentilatorWorker(QThread):
                             self.handle_settings(data_a)
 
                 if self.port_b.in_waiting > 0:
-                    data_b = self.port_b.read(self.port_b.in_waiting).decode('utf-8', errors='ignore')
+                    data_b = self.port_b.read(self.port_b.in_waiting).decode('latin-1', errors='ignore')
                     if not ports_identified:
                         self.buffer_b += data_b
                         if self.waveform_pattern.search(self.buffer_b):
@@ -324,18 +326,22 @@ class VentilatorWorker(QThread):
                 self.sig_waveform_data.emit(self.current_pressure, visual_flow)
 
                 # 5. Database Batch Commit (Every 1.0s)
-                # This prevents disk thrashing from 50Hz inserts
                 if now - last_db_commit >= 1.0:
                     self.db_manager.commit_batch()
                     last_db_commit = now
 
-                # 6. Write ID Message (Every 5s)
+                # 6. Write Command Message (Every 5s)
+                # Modified to force Flush and ASCII encoding
                 if ports_identified and (now - last_serial_write >= 5.0):
-                    msg = f"ID:{self.patient_id} - {datetime.now().strftime('%H:%M:%S')}\n"
+                    msg = "SNDF\r"
                     try:
-                        self.settings_port.write(msg.encode('utf-8'))
+                        # Command strings are standard ASCII
+                        self.settings_port.write(msg.encode('ascii'))
+                        self.settings_port.flush()  # Force transmission immediately
                         last_serial_write = now
-                    except:
+                    except Exception as e:
+                        # Print error to console but keep running
+                        print(f"Serial Write Error: {e}")
                         pass
 
                 # 7. Metronome
@@ -375,6 +381,7 @@ class VentilatorWorker(QThread):
         self.db_manager.insert_waveform(self.patient_id, data, val)
 
     def handle_settings(self, data):
+        # CRITICAL: Write raw data to file/db BEFORE parsing.
         self.safe_write_file(self.file_settings, data)
         self.db_manager.insert_setting(self.patient_id, data)
         self.process_settings_buffer(data)
@@ -402,16 +409,47 @@ class VentilatorWorker(QThread):
 
     def process_settings_buffer(self, new_chunk):
         self.settings_line_buffer += new_chunk
+
+        # Guard against buffer explosion
         if len(self.settings_line_buffer) > self.MAX_BUFFER_SIZE:
             self.settings_line_buffer = ""
             return
 
-        if '\n' in self.settings_line_buffer:
-            lines = self.settings_line_buffer.split('\n')
+        # Use Carriage Return \r as delimiter for Settings Port
+        if '\r' in self.settings_line_buffer:
+            lines = self.settings_line_buffer.split('\r')
+
+            # Process all complete lines
             for line in lines[:-1]:
                 clean = line.strip()
                 if clean:
-                    self.sig_settings_msg.emit(clean)
+                    try:
+                        # --- Parsing Logic ---
+                        # Expecting CSV format with ~173 fields (PB980)
+                        parts = clean.split(',')
+
+                        # Validate structure before accessing indices
+                        if len(parts) >= 173:
+                            # .strip() handles PB980's 6-character fixed width padding
+                            mode = parts[7].strip()
+                            mandatory_type = parts[8].strip()
+                            spont_type = parts[9].strip()
+
+                            # Concatenate strictly as requested: "Mode: {Mandatory} {Spont} {Mode}"
+                            raw_str = f"Mode: {mandatory_type} {spont_type} {mode}"
+
+                            # Normalize whitespace (removes double spaces if spont_type is empty)
+                            display_str = " ".join(raw_str.split())
+
+                            self.sig_settings_msg.emit(display_str)
+                        else:
+                            # Raw data is already saved in handle_settings.
+                            pass
+
+                    except Exception:
+                        pass
+
+            # Keep the incomplete remainder
             self.settings_line_buffer = lines[-1]
 
     def log_crash(self, e):
@@ -574,6 +612,8 @@ if __name__ == "__main__":
         except:
             pass
         sys.__excepthook__(exctype, value, tb)
+
+
     sys.excepthook = exception_hook
 
     app = QApplication(sys.argv)
