@@ -26,7 +26,6 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install nuitka zstandard
-          # Installing exactly what is needed for the build
           pip install pyside6 numpy pyqtgraph pyserial
 
       # --- 2. Compile with Nuitka ---
@@ -45,10 +44,9 @@ jobs:
             --product-version="1.0.0.0" `
             main.py
 
-      # --- 2.5. Sign the Inner Executable (main.exe) ---
-      # Crucial: This must happen BEFORE packaging into SFX
-      # --- REPLACED: Recursive Signing for Maximum Compatibility ---
-      - name: Sign EVERYTHING (DLLs, PYDs, EXEs)
+      # --- 2.5. Sign EVERYTHING (Recursive) ---
+      # This ensures main.exe AND all nested DLLs (numpy, PySide6) are signed.
+      - name: Sign Main.dist Recursively
         uses: azure/artifact-signing-action@v1
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -57,22 +55,26 @@ jobs:
           endpoint: ${{ secrets.AZURE_ENDPOINT }}
           signing-account-name: ${{ secrets.AZURE_CODE_SIGNING_NAME }}
           certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE_NAME }}
-          # Target the folder containing your loose files
           files-folder: main.dist
-          # Recursively match all binary extensions
           files-folder-filter: "*.exe,*.dll,*.pyd"
+          # CRITICAL FIX: Enable recursion to reach subdirectories
+          files-folder-recurse: true
           file-digest: sha256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: sha256
 
-      # --- 3. Package SFX ---
+      # --- 3. Package Plan B (Portable Zip) ---
+      # We zip the signed directory so it is ready for USB distribution
+      - name: Create Portable Zip
+        run: |
+          Compress-Archive -Path main.dist -DestinationPath Syncron-E-Portable.zip
+
+      # --- 4. Package Plan A (SFX Installer) ---
       - name: Create Installer (SFX)
         run: |
-          # 7-Zip is generally in the PATH on Windows runners, but we use your script's logic.
-          # Ensure 7zSD.sfx is committed to the repo!
           .\build_installer.ps1
 
-      # --- 4. Sign the Final Installer ---
+      # --- 5. Sign the SFX Installer ---
       - name: Sign Outer Installer (SFX)
         uses: azure/artifact-signing-action@v1
         with:
@@ -88,9 +90,18 @@ jobs:
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: sha256
 
-      # --- 5. Upload Artifact ---
-      - name: Upload Artifact
+      # --- 6. Upload Artifacts ---
+
+      # Upload Plan A: The Installer
+      - name: Upload Installer
         uses: actions/upload-artifact@v4
         with:
           name: Syncron-E-Installer
           path: "Syncron-E CD Logger.exe"
+
+      # Upload Plan B: The Portable Zip
+      - name: Upload Portable Version
+        uses: actions/upload-artifact@v4
+        with:
+          name: Syncron-E-Portable
+          path: "Syncron-E-Portable.zip"

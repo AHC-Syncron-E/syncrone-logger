@@ -67,10 +67,12 @@ jobs:
           endpoint: ${{ secrets.AZURE_ENDPOINT }}
           signing-account-name: ${{ secrets.AZURE_CODE_SIGNING_NAME }}
           certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE_NAME }}
-          # CORRECTED: Target 'payload' because we renamed main.dist in the previous step
+          # Target 'payload' (renamed from main.dist)
           files-folder: payload
           # Recursively match all binary extensions
           files-folder-filter: "*.exe,*.dll,*.pyd"
+          # CRITICAL FIX: Enable recursion here too
+          files-folder-recurse: true
           file-digest: sha256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: sha256
