@@ -85,21 +85,22 @@ jobs:
           New-Item -ItemType Directory -Force -Path $assetsDir
 
           # A. Generate Required PNGs from your icon.ico using ImageMagick
-          # MSIX needs specific sizes. We verify magick exists first.
-          magick --version
+          # FIX: We use 'icon.ico[0]' to select the first layer so it doesn't 
+          # generate multiple files like logo-0.png, logo-1.png.
           
           # Square 44x44 Logo
-          magick convert icon.ico -resize 44x44 "$assetsDir\Square44x44Logo.png"
+          magick "icon.ico[0]" -resize 44x44 "$assetsDir\Square44x44Logo.png"
+          
           # Square 150x150 Logo
-          magick convert icon.ico -resize 150x150 "$assetsDir\Square150x150Logo.png"
+          magick "icon.ico[0]" -resize 150x150 "$assetsDir\Square150x150Logo.png"
+          
           # Store Logo (50x50)
-          magick convert icon.ico -resize 50x50 "$assetsDir\StoreLogo.png"
-          # Splash Screen (Optional but good) - reusing 150x150 for simplicity
+          magick "icon.ico[0]" -resize 50x50 "$assetsDir\StoreLogo.png"
+          
+          # Splash Screen (Reusing 150x150)
           Copy-Item "$assetsDir\Square150x150Logo.png" "$assetsDir\SplashScreen.png"
 
           # B. Generate AppxManifest.xml
-          # Note: The 'Identity Name' must be alphanumeric (no spaces).
-          # 'Publisher' must match your Cert Subject exactly.
           $manifestContent = @"
           <?xml version="1.0" encoding="utf-8"?>
           <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10" 
