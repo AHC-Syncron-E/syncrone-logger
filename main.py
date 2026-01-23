@@ -2,8 +2,14 @@ import sys
 import time
 import math
 import ctypes
+import re
+import shutil
+import sqlite3
+import traceback
+import os
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
+from collections import deque
 
 # Serial Communication
 import serial
@@ -13,7 +19,7 @@ import serial.tools.list_ports
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QHBoxLayout, QPushButton, QLabel, QFrame, QMessageBox,
                                QLineEdit, QSpacerItem, QSizePolicy)
-from PySide6.QtCore import Qt, QThread, Signal, Slot
+from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer
 from PySide6.QtGui import QFont, QIcon, QColor
 
 # Graphing
@@ -21,128 +27,400 @@ import pyqtgraph as pg
 
 
 # -----------------------------------------------------------------------------
-# 1. WORKER THREAD (Handles Serial Comm & Data Generation)
+# 1. DATABASE MANAGER (Optimized for Batch Writes)
+# -----------------------------------------------------------------------------
+class DatabaseManager:
+    def __init__(self, db_path):
+        self.db_path = db_path
+        self.conn = None
+        self.cursor = None
+
+    def connect(self):
+        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
+        self.cursor = self.conn.cursor()
+
+        # WAL Mode is critical for concurrent reading/writing reliability
+        self.conn.execute("PRAGMA journal_mode=WAL;")
+        self.conn.execute("PRAGMA synchronous=NORMAL;")
+        self._create_tables()
+
+    def _create_tables(self):
+        self.conn.execute("""
+                          CREATE TABLE IF NOT EXISTS waveforms
+                          (
+                              id
+                              INTEGER
+                              PRIMARY
+                              KEY
+                              AUTOINCREMENT,
+                              session_id
+                              TEXT,
+                              timestamp
+                              TEXT,
+                              raw_data
+                              TEXT,
+                              parsed_value
+                              REAL
+                          )
+                          """)
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_wf_sess ON waveforms (session_id);")
+
+        self.conn.execute("""
+                          CREATE TABLE IF NOT EXISTS settings
+                          (
+                              id
+                              INTEGER
+                              PRIMARY
+                              KEY
+                              AUTOINCREMENT,
+                              session_id
+                              TEXT,
+                              timestamp
+                              TEXT,
+                              raw_data
+                              TEXT
+                          )
+                          """)
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_st_sess ON settings (session_id);")
+        self.conn.commit()
+
+    def insert_waveform(self, session_id, raw_data, parsed_value=None):
+        # NOTE: We do NOT commit here. We rely on the worker to call commit_batch() periodically.
+        ts = datetime.now().isoformat()
+        self.conn.execute(
+            "INSERT INTO waveforms (session_id, timestamp, raw_data, parsed_value) VALUES (?, ?, ?, ?)",
+            (session_id, ts, raw_data, parsed_value)
+        )
+
+    def insert_setting(self, session_id, raw_data):
+        ts = datetime.now().isoformat()
+        self.conn.execute(
+            "INSERT INTO settings (session_id, timestamp, raw_data) VALUES (?, ?, ?)",
+            (session_id, ts, raw_data)
+        )
+        # Settings are rare (every 5s), so we CAN commit immediately for safety
+        self.conn.commit()
+
+    def commit_batch(self):
+        """Called periodically to save buffered waveform writes."""
+        if self.conn:
+            self.conn.commit()
+
+    def close(self):
+        if self.conn:
+            self.conn.close()
+
+
+# -----------------------------------------------------------------------------
+# 2. WORKER THREAD (7-Day Stability Logic)
 # -----------------------------------------------------------------------------
 class VentilatorWorker(QThread):
     # Signals
-    sig_status_update = Signal(str, str)  # status_msg, color_code
-    sig_mode_update = Signal(str)  # Updates the "Mode" or "Received Msg" text
-    sig_waveform_data = Signal(float, float)  # pressure (top), flow (bottom)
+    sig_status_update = Signal(str, str)
+    sig_settings_msg = Signal(str)
+    sig_waveform_data = Signal(float, float)
     sig_error = Signal(str)
 
-    def __init__(self, patient_id, db_path):
+    def __init__(self, patient_id):
         super().__init__()
         self.patient_id = patient_id
-        self.db_path = db_path
         self.is_running = False
-        self.serial_port = None
-        self.read_buffer = ""  # Buffer for incoming serial data
 
-        # Target Device Identity (FTDI)
-        self.TARGET_VID = 0x0403
-        self.TARGET_PID = 0x6001
+        # Serial Objects
+        self.port_a = None
+        self.port_b = None
+        self.waveform_port = None
+        self.settings_port = None
 
-    def find_target_device(self):
-        """Scans ports for the specific FTDI cable."""
+        # Data Paths
+        self.base_folder = Path.home() / "Desktop" / "Syncron-E Data"
+        self.file_waveform = None
+        self.file_settings = None
+        self.db_manager = None
+
+        # Buffers
+        self.buffer_a = ""
+        self.buffer_b = ""
+        self.waveform_line_buffer = ""
+        self.settings_line_buffer = ""
+        self.MAX_BUFFER_SIZE = 8192  # Increased for larger settings strings
+
+        # State
+        self.current_pressure = 0.0
+
+        # File Rotation Tracking
+        self.current_file_date = None
+        self.last_rotation_check = 0
+
+        # Supported Devices
+        self.SUPPORTED_DEVICES = [
+            (0x0403, 0x6001),  # FTDI
+            (0x067B, 0x23A3),  # Prolific A
+            (0x067B, 0x2303),  # Prolific B
+        ]
+
+        self.waveform_pattern = re.compile(r"BS,\s*S:(\d+),")
+
+    # --- File Management (Rotation) ---
+    def open_log_files(self):
+        """Opens log files based on current timestamp."""
+        self.base_folder.mkdir(parents=True, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.current_file_date = datetime.now().date()
+
+        # We append timestamp to ensure uniqueness on every start/rotation
+        wf_name = f"waveforms_{timestamp}.txt"
+        st_name = f"settings_{timestamp}.txt"
+
+        self.file_waveform = open(self.base_folder / wf_name, 'w', encoding='utf-8', buffering=1)
+        self.file_settings = open(self.base_folder / st_name, 'w', encoding='utf-8', buffering=1)
+
+    def check_file_rotation(self):
+        """Checks if 24 hours have passed and rotates files if needed."""
+        now = time.monotonic()
+        # Only check every 60 seconds to save CPU
+        if now - self.last_rotation_check < 60:
+            return
+
+        self.last_rotation_check = now
+        if datetime.now().date() > self.current_file_date:
+            # Day changed! Rotate.
+            self.sig_status_update.emit("ROTATING FILES...", "#00aaff")
+
+            # Close old
+            if self.file_waveform: self.file_waveform.close()
+            if self.file_settings: self.file_settings.close()
+
+            # Open new
+            self.open_log_files()
+            self.sig_status_update.emit("LOGGING (Rotated)", "#00ff00")
+
+    def safe_write_file(self, file_handle, data):
+        """Writes and flushes. Vital for crash recovery."""
+        if file_handle:
+            try:
+                file_handle.write(data)
+                file_handle.flush()
+                os.fsync(file_handle.fileno())
+            except Exception as e:
+                print(f"Write failed: {e}")
+
+    # --- Setup & Cleanup ---
+    def setup_system(self):
+        self.base_folder.mkdir(parents=True, exist_ok=True)
+
+        # Database
+        db_path = self.base_folder / "syncrone.db"
+        self.db_manager = DatabaseManager(str(db_path))
+        self.db_manager.connect()
+
+        # Files
+        self.open_log_files()
+
+    def close_system(self):
+        if self.port_a and self.port_a.is_open: self.port_a.close()
+        if self.port_b and self.port_b.is_open: self.port_b.close()
+
+        if self.db_manager:
+            self.db_manager.close()
+
+        if self.file_waveform: self.file_waveform.close()
+        if self.file_settings: self.file_settings.close()
+
+    def configure_port(self, port_obj, baud_rate):
+        port_obj.baudrate = baud_rate
+        port_obj.bytesize = serial.EIGHTBITS
+        port_obj.parity = serial.PARITY_NONE
+        port_obj.stopbits = serial.STOPBITS_ONE
+        port_obj.reset_input_buffer()
+        port_obj.reset_output_buffer()
+
+    def get_valid_ports(self):
+        valid_devices = []
         ports = serial.tools.list_ports.comports()
         for port in ports:
-            if port.vid == self.TARGET_VID and port.pid == self.TARGET_PID:
-                return port.device
-        return None
+            for (vid, pid) in self.SUPPORTED_DEVICES:
+                if port.vid == vid and port.pid == pid:
+                    valid_devices.append(port.device)
+                    break
+        return sorted(list(set(valid_devices)))
 
+    # --- Main Loop ---
     def run(self):
         self.is_running = True
 
-        # --- 1. Auto-Detect Port ---
-        self.sig_status_update.emit("SCANNING FOR CABLE...", "#ffff00")  # Yellow
-        target_com_port = self.find_target_device()
-
-        if not target_com_port:
-            self.sig_error.emit("Syncron-E Cable (FTDI) not found!\nPlease check USB connection.")
-            self.sig_status_update.emit("Syncron-E Cable (FTDI) not found!", "#ffff00")
-            return
-
-        # --- 2. Connect ---
         try:
-            self.serial_port = serial.Serial(
-                port=target_com_port,
-                baudrate=9600,
-                timeout=0  # Non-blocking read
-            )
-            self.sig_status_update.emit(f"CONNECTED: {target_com_port}", "#00ff00")  # Green
+            self.sig_status_update.emit("SCANNING PORTS...", "#ffff00")
+            found_devices = self.get_valid_ports()
 
-        except serial.SerialException as e:
-            self.sig_error.emit(f"Could not open {target_com_port}.\nIs it in use?\nError: {e}")
-            return
+            if len(found_devices) < 2:
+                self.sig_error.emit(f"Found {len(found_devices)} cable(s).\nNeed exactly 2.")
+                self.sig_status_update.emit("CONNECTION FAILED", "#ff0000")
+                return
 
-        # --- 3. Main Loop Setup (Metronome & Monotonic Time) ---
-        # Use monotonic time for robust duration calculation
-        start_time = time.monotonic()
-        last_serial_write = start_time
+            dev_a, dev_b = found_devices[0], found_devices[1]
 
-        # Metronome settings
-        loop_interval = 0.04  # 25 Hz target
-        next_wake_time = time.monotonic() + loop_interval
+            # Initialize
+            self.setup_system()
 
-        try:
+            self.port_a = serial.Serial(dev_a, timeout=0)
+            self.configure_port(self.port_a, 38400)
+
+            self.port_b = serial.Serial(dev_b, timeout=0)
+            self.configure_port(self.port_b, 38400)
+
+            self.sig_status_update.emit("IDENTIFYING PORTS...", "#00aaff")
+
+            # Loop State
+            start_time = time.monotonic()
+            last_serial_write = start_time
+            last_db_commit = start_time
+
+            loop_interval = 0.04  # 25 Hz
+            next_wake_time = time.monotonic() + loop_interval
+
+            ports_identified = False
+            self.current_pressure = 0.0
+
             while self.is_running:
                 now = time.monotonic()
                 elapsed = now - start_time
 
-                # A. Generate Dummy Waveforms
-                pressure = 15 + 15 * math.cos(elapsed * 2)
-                flow = 60 * math.sin(elapsed * 2)
-                self.sig_waveform_data.emit(pressure, flow)
+                # 1. File Maintenance
+                self.check_file_rotation()
 
-                # B. Write to Serial Port (Every 1.0 second)
-                if now - last_serial_write >= 1.0:
+                # 2. Visuals
+                visual_flow = 60 * math.sin(elapsed * 2)
+
+                # 3. Read & Process
+                if self.port_a.in_waiting > 0:
+                    data_a = self.port_a.read(self.port_a.in_waiting).decode('utf-8', errors='ignore')
+                    if not ports_identified:
+                        self.buffer_a += data_a
+                        if self.waveform_pattern.search(self.buffer_a):
+                            self.assign_ports(self.port_a, self.port_b, self.buffer_a, "A")
+                            ports_identified = True
+                    else:
+                        if self.port_a == self.waveform_port:
+                            self.handle_waveform(data_a)
+                        else:
+                            self.handle_settings(data_a)
+
+                if self.port_b.in_waiting > 0:
+                    data_b = self.port_b.read(self.port_b.in_waiting).decode('utf-8', errors='ignore')
+                    if not ports_identified:
+                        self.buffer_b += data_b
+                        if self.waveform_pattern.search(self.buffer_b):
+                            self.assign_ports(self.port_b, self.port_a, self.buffer_b, "B")
+                            ports_identified = True
+                    else:
+                        if self.port_b == self.waveform_port:
+                            self.handle_waveform(data_b)
+                        else:
+                            self.handle_settings(data_b)
+
+                # 4. Update UI
+                self.sig_waveform_data.emit(self.current_pressure, visual_flow)
+
+                # 5. Database Batch Commit (Every 1.0s)
+                # This prevents disk thrashing from 50Hz inserts
+                if now - last_db_commit >= 1.0:
+                    self.db_manager.commit_batch()
+                    last_db_commit = now
+
+                # 6. Write ID Message (Every 5s)
+                if ports_identified and (now - last_serial_write >= 5.0):
                     msg = f"ID:{self.patient_id} - {datetime.now().strftime('%H:%M:%S')}\n"
-                    self.serial_port.write(msg.encode('utf-8'))
-                    last_serial_write = now
-
-                # C. Read from Serial Port (Check for incoming messages)
-                if self.serial_port.in_waiting > 0:
                     try:
-                        # Read available bytes and decode
-                        chunk = self.serial_port.read(self.serial_port.in_waiting).decode('utf-8', errors='ignore')
-                        self.read_buffer += chunk
+                        self.settings_port.write(msg.encode('utf-8'))
+                        last_serial_write = now
+                    except:
+                        pass
 
-                        # If we have a newline, we have a complete message
-                        if '\n' in self.read_buffer:
-                            lines = self.read_buffer.split('\n')
-                            # Take the last complete line as the status update
-                            # (lines[-1] is the incomplete part for the next loop)
-                            if len(lines) > 1:
-                                latest_msg = lines[-2].strip()
-                                if latest_msg:
-                                    self.sig_mode_update.emit(latest_msg)
-
-                            # Keep the remaining incomplete part in the buffer
-                            self.read_buffer = lines[-1]
-                    except Exception as e:
-                        print(f"Serial Read Error: {e}")
-
-                # D. Metronome Sleep Logic
-                # Calculate how much time remains until the next scheduled tick
+                # 7. Metronome
                 sleep_duration = next_wake_time - time.monotonic()
-
                 if sleep_duration > 0:
                     time.sleep(sleep_duration)
                 else:
-                    # If we are lagging behind (processing took too long),
-                    # reset the metronome to avoid a burst of rapid loops to catch up.
                     next_wake_time = time.monotonic()
-
-                # Schedule next tick
                 next_wake_time += loop_interval
 
         except Exception as e:
+            self.log_crash(e)
             self.sig_error.emit(f"Runtime Error: {e}")
         finally:
-            if self.serial_port and self.serial_port.is_open:
-                self.serial_port.close()
+            self.close_system()
             self.sig_status_update.emit("STOPPED", "#888888")
-            self.sig_mode_update.emit("Mode: --")
+
+    def assign_ports(self, wave_port, set_port, init_buffer, name):
+        """Helper to lock in port roles."""
+        self.waveform_port = wave_port
+        self.settings_port = set_port
+
+        # Configure baud rates
+        self.configure_port(self.settings_port, 9600)
+        # Waveform port stays at 38400
+
+        self.sig_status_update.emit(f"LOGGING (Port {name}=Wave)", "#00ff00")
+
+        # Process initial buffer
+        self.safe_write_file(self.file_waveform, init_buffer)
+        self.db_manager.insert_waveform(self.patient_id, init_buffer)
+        self.process_waveform_buffer(init_buffer)
+
+    def handle_waveform(self, data):
+        self.safe_write_file(self.file_waveform, data)
+        val = self.process_waveform_buffer(data)
+        self.db_manager.insert_waveform(self.patient_id, data, val)
+
+    def handle_settings(self, data):
+        self.safe_write_file(self.file_settings, data)
+        self.db_manager.insert_setting(self.patient_id, data)
+        self.process_settings_buffer(data)
+
+    def process_waveform_buffer(self, new_chunk):
+        self.waveform_line_buffer += new_chunk
+        if len(self.waveform_line_buffer) > self.MAX_BUFFER_SIZE:
+            self.waveform_line_buffer = ""  # Flush overflow
+            return None
+
+        last_val = None
+        if '\n' in self.waveform_line_buffer:
+            lines = self.waveform_line_buffer.split('\n')
+            for line in lines[:-1]:
+                match = self.waveform_pattern.search(line)
+                if match:
+                    try:
+                        val = float(match.group(1))
+                        self.current_pressure = val
+                        last_val = val
+                    except:
+                        pass
+            self.waveform_line_buffer = lines[-1]
+        return last_val
+
+    def process_settings_buffer(self, new_chunk):
+        self.settings_line_buffer += new_chunk
+        if len(self.settings_line_buffer) > self.MAX_BUFFER_SIZE:
+            self.settings_line_buffer = ""
+            return
+
+        if '\n' in self.settings_line_buffer:
+            lines = self.settings_line_buffer.split('\n')
+            for line in lines[:-1]:
+                clean = line.strip()
+                if clean:
+                    self.sig_settings_msg.emit(clean)
+            self.settings_line_buffer = lines[-1]
+
+    def log_crash(self, e):
+        try:
+            log_path = self.base_folder / "error_log.txt"
+            with open(log_path, "a") as f:
+                f.write(f"\n[CRASH {datetime.now()}] {str(e)}\n{traceback.format_exc()}\n")
+        except:
+            pass
 
     def stop(self):
         self.is_running = False
@@ -150,128 +428,93 @@ class VentilatorWorker(QThread):
 
 
 # -----------------------------------------------------------------------------
-# 2. MAIN WINDOW
+# 3. MAIN WINDOW
 # -----------------------------------------------------------------------------
 class VentilatorApp(QMainWindow):
     def __init__(self):
         super().__init__()
-
         self.setWindowTitle("Syncron-E Clinical Data Logger")
         self.resize(1000, 750)
         self.setStyleSheet("background-color: #1e1e1e; color: #ffffff;")
-
-        # Internal State
         self.is_logging = False
 
-        # Styles for the merged button
-        self.STYLE_BTN_START = "background-color: #007acc; border-radius: 5px; color: white;"
-        self.STYLE_BTN_STOP = "background-color: #cc3300; border-radius: 5px; color: white;"
-        self.STYLE_BTN_DISABLED = "background-color: #444444; border-radius: 5px; color: #888888;"
-
-        # Load Icon
         if Path("icon.ico").exists():
             self.setWindowIcon(QIcon("icon.ico"))
-
         self.prevent_sleep()
-        self.save_dir = Path.home() / "Documents" / "VentilatorLogs"
-        self.save_dir.mkdir(parents=True, exist_ok=True)
 
-        # --- Layout Setup ---
+        # UI Setup
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
-        main_layout = QVBoxLayout(central_widget)
-        main_layout.setContentsMargins(20, 20, 20, 20)
-        main_layout.setSpacing(15)
+        layout = QVBoxLayout(central_widget)
 
-        # 1. Header (Status + Received Msg Display)
-        self.header_frame = QFrame()
-        self.header_frame.setStyleSheet("background-color: #333; border-radius: 8px;")
-        header_layout = QHBoxLayout(self.header_frame)
+        # Header
+        header = QFrame()
+        header.setStyleSheet("background-color: #333; border-radius: 8px;")
+        h_layout = QHBoxLayout(header)
 
-        self.status_indicator = QLabel("●")
-        self.status_indicator.setFont(QFont("Arial", 28))
-        self.status_indicator.setStyleSheet("color: #888888;")
+        self.status_dot = QLabel("●")
+        self.status_dot.setFont(QFont("Arial", 28))
+        self.status_dot.setStyleSheet("color: #888;")
 
-        self.status_label = QLabel("READY")
-        self.status_label.setFont(QFont("Segoe UI", 16, QFont.Bold))
+        self.status_lbl = QLabel("READY")
+        self.status_lbl.setFont(QFont("Segoe UI", 16, QFont.Bold))
 
-        spacer = QSpacerItem(40, 20, QSizePolicy.Expanding, QSizePolicy.Minimum)
+        self.mode_lbl = QLabel("Mode: --")
+        self.mode_lbl.setFont(QFont("Segoe UI", 16, QFont.Bold))
+        self.mode_lbl.setStyleSheet("color: #00aaff;")
 
-        # Label for Incoming Serial Messages (formerly Mode)
-        self.mode_label = QLabel("Mode: --")
-        self.mode_label.setFont(QFont("Segoe UI", 16, QFont.Bold))
-        self.mode_label.setStyleSheet("color: #00aaff;")
+        h_layout.addWidget(self.status_dot)
+        h_layout.addWidget(self.status_lbl)
+        h_layout.addStretch()
+        h_layout.addWidget(self.mode_lbl)
+        h_layout.addSpacing(20)
 
-        header_layout.addWidget(self.status_indicator)
-        header_layout.addWidget(self.status_label)
-        header_layout.addItem(spacer)
-        header_layout.addWidget(self.mode_label)
-        header_layout.addSpacing(20)
-
-        # 2. Waveform Graphs
+        # Graphs
         pg.setConfigOption('background', '#000000')
         pg.setConfigOption('foreground', '#d0d0d0')
         pg.setConfigOptions(antialias=True)
-
         self.plot_widget = pg.GraphicsLayoutWidget()
 
-        self.p_plot = self.plot_widget.addPlot(title="Pressure (cmH2O)")
-        self.p_plot.setYRange(0, 40)
+        self.p_plot = self.plot_widget.addPlot(title="Pressure State")
+        self.p_plot.enableAutoRange(axis='y')
         self.p_plot.showGrid(x=True, y=True, alpha=0.3)
-        self.p_curve = self.p_plot.plot(pen=pg.mkPen('#00ff00', width=2))
+        self.p_curve = self.p_plot.plot(pen=pg.mkPen('#00ff00', width=2), symbol='o', symbolSize=5)
 
         self.plot_widget.nextRow()
-
         self.f_plot = self.plot_widget.addPlot(title="Flow (L/min)")
         self.f_plot.setYRange(-70, 70)
         self.f_plot.showGrid(x=True, y=True, alpha=0.3)
         self.f_curve = self.f_plot.plot(pen=pg.mkPen('#ffff00', width=2))
 
+        # Memory Optimization: Deque
         self.data_len = 200
-        self.pressure_data = [0] * self.data_len
-        self.flow_data = [0] * self.data_len
+        self.pressure_data = deque([0] * self.data_len, maxlen=self.data_len)
+        self.flow_data = deque([0] * self.data_len, maxlen=self.data_len)
 
-        # 3. Footer (Patient ID + Controls)
-        footer_layout = QVBoxLayout()
-
+        # Footer
+        footer = QVBoxLayout()
         id_layout = QHBoxLayout()
-        lbl_id = QLabel("Patient ID / Session Identifier:")
-        lbl_id.setFont(QFont("Segoe UI", 12))
-        lbl_id.setStyleSheet("color: #cccccc;")
 
-        self.input_patient_id = QLineEdit()
-        self.input_patient_id.setPlaceholderText("Enter Identifier (e.g. PT-101)...")
-        self.input_patient_id.setFont(QFont("Segoe UI", 12))
-        self.input_patient_id.setStyleSheet("""
-            QLineEdit { 
-                padding: 5px; 
-                border-radius: 4px; 
-                border: 1px solid #555;
-                background-color: #2b2b2b;
-                color: white;
-            }
-            QLineEdit:focus { border: 1px solid #007acc; }
-        """)
-        self.input_patient_id.textChanged.connect(self.check_input_validity)
-
-        id_layout.addWidget(lbl_id)
-        id_layout.addWidget(self.input_patient_id)
+        self.input_id = QLineEdit()
+        self.input_id.setPlaceholderText("Enter Patient ID...")
+        self.input_id.setStyleSheet("padding: 5px; background: #2b2b2b; color: white; border: 1px solid #555;")
+        self.input_id.textChanged.connect(self.check_input)
 
         self.btn_action = QPushButton("START LOGGING")
         self.btn_action.setMinimumHeight(60)
         self.btn_action.setFont(QFont("Segoe UI", 14, QFont.Bold))
+        self.btn_action.setStyleSheet("background-color: #444; color: #888; border-radius: 5px;")
+        self.btn_action.setEnabled(False)
         self.btn_action.clicked.connect(self.toggle_logging)
 
-        self.btn_action.setEnabled(False)
-        self.btn_action.setStyleSheet(self.STYLE_BTN_DISABLED)
+        id_layout.addWidget(QLabel("Patient ID:"))
+        id_layout.addWidget(self.input_id)
+        footer.addLayout(id_layout)
+        footer.addWidget(self.btn_action)
 
-        footer_layout.addLayout(id_layout)
-        footer_layout.addSpacing(10)
-        footer_layout.addWidget(self.btn_action)
-
-        main_layout.addWidget(self.header_frame, 1)
-        main_layout.addWidget(self.plot_widget, 8)
-        main_layout.addLayout(footer_layout, 1)
+        layout.addWidget(header, 1)
+        layout.addWidget(self.plot_widget, 8)
+        layout.addLayout(footer, 1)
 
     def prevent_sleep(self):
         try:
@@ -279,79 +522,60 @@ class VentilatorApp(QMainWindow):
         except:
             pass
 
-    def check_input_validity(self):
-        if self.is_logging:
-            return
-
-        patient_id = self.input_patient_id.text().strip()
-        if patient_id:
+    def check_input(self):
+        if self.is_logging: return
+        if self.input_id.text().strip():
             self.btn_action.setEnabled(True)
-            self.btn_action.setStyleSheet(self.STYLE_BTN_START)
+            self.btn_action.setStyleSheet("background-color: #007acc; color: white; border-radius: 5px;")
         else:
             self.btn_action.setEnabled(False)
-            self.btn_action.setStyleSheet(self.STYLE_BTN_DISABLED)
+            self.btn_action.setStyleSheet("background-color: #444; color: #888; border-radius: 5px;")
 
     def toggle_logging(self):
         if not self.is_logging:
-            self.start_logging()
+            self.worker = VentilatorWorker(self.input_id.text().strip())
+            self.worker.sig_status_update.connect(self.update_status)
+            self.worker.sig_settings_msg.connect(self.mode_lbl.setText)
+            self.worker.sig_waveform_data.connect(self.update_plot)
+            self.worker.sig_error.connect(lambda m: (self.worker.stop(), QMessageBox.critical(self, "Error", m)))
+            self.worker.start()
+
+            self.is_logging = True
+            self.input_id.setEnabled(False)
+            self.btn_action.setText("STOP")
+            self.btn_action.setStyleSheet("background-color: #cc3300; color: white; border-radius: 5px;")
         else:
-            self.stop_logging()
-
-    def start_logging(self):
-        patient_id = self.input_patient_id.text().strip()
-        if not patient_id:
-            return
-
-        self.is_logging = True
-        self.input_patient_id.setEnabled(False)
-        self.btn_action.setText("STOP")
-        self.btn_action.setStyleSheet(self.STYLE_BTN_STOP)
-
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        db_filename = self.save_dir / f"syncrone_{patient_id}_{timestamp}.db"
-
-        self.worker = VentilatorWorker(patient_id, str(db_filename))
-        self.worker.sig_status_update.connect(self.update_status)
-        self.worker.sig_mode_update.connect(self.update_mode)
-        self.worker.sig_waveform_data.connect(self.update_plot)
-        self.worker.sig_error.connect(self.handle_error)
-        self.worker.start()
-
-    def stop_logging(self):
-        if hasattr(self, 'worker'):
-            self.worker.stop()
-
-        self.is_logging = False
-        self.input_patient_id.setEnabled(True)
-        self.mode_label.setText("Mode: --")
-
-        self.btn_action.setText("START LOGGING")
-        self.check_input_validity()
+            if hasattr(self, 'worker'): self.worker.stop()
+            self.is_logging = False
+            self.input_id.setEnabled(True)
+            self.btn_action.setText("START LOGGING")
+            self.check_input()
 
     @Slot(str, str)
     def update_status(self, msg, color):
-        self.status_label.setText(msg)
-        self.status_indicator.setStyleSheet(f"color: {color};")
-
-    @Slot(str)
-    def update_mode(self, mode_text):
-        # Displays received serial messages
-        self.mode_label.setText(mode_text)
+        self.status_lbl.setText(msg)
+        self.status_dot.setStyleSheet(f"color: {color};")
 
     @Slot(float, float)
-    def update_plot(self, pressure, flow):
-        self.pressure_data = self.pressure_data[1:] + [pressure]
-        self.flow_data = self.flow_data[1:] + [flow]
-        self.p_curve.setData(self.pressure_data)
-        self.f_curve.setData(self.flow_data)
-
-    @Slot(str)
-    def handle_error(self, msg):
-        self.stop_logging()
-        QMessageBox.critical(self, "Error", msg)
+    def update_plot(self, p, f):
+        self.pressure_data.append(p)
+        self.flow_data.append(f)
+        self.p_curve.setData(list(self.pressure_data))
+        self.f_curve.setData(list(self.flow_data))
 
 
 if __name__ == "__main__":
+    def exception_hook(exctype, value, tb):
+        error_msg = "".join(traceback.format_exception(exctype, value, tb))
+        try:
+            log_path = Path.home() / "Desktop" / "Syncron-E Data" / "error_log.txt"
+            with open(log_path, "a") as f:
+                f.write(f"\n[GUI CRASH {datetime.now()}]\n{error_msg}\n")
+        except:
+            pass
+        sys.__excepthook__(exctype, value, tb)
+    sys.excepthook = exception_hook
+
     app = QApplication(sys.argv)
     window = VentilatorApp()
     window.show()
