@@ -47,7 +47,8 @@ jobs:
 
       # --- 2.5. Sign the Inner Executable (main.exe) ---
       # Crucial: This must happen BEFORE packaging into SFX
-      - name: Sign Inner Main.exe
+      # --- REPLACED: Recursive Signing for Maximum Compatibility ---
+      - name: Sign EVERYTHING (DLLs, PYDs, EXEs)
         uses: azure/artifact-signing-action@v1
         with:
           azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
@@ -56,8 +57,10 @@ jobs:
           endpoint: ${{ secrets.AZURE_ENDPOINT }}
           signing-account-name: ${{ secrets.AZURE_CODE_SIGNING_NAME }}
           certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE_NAME }}
+          # Target the folder containing your loose files
           files-folder: main.dist
-          files-folder-filter: "main.exe"
+          # Recursively match all binary extensions
+          files-folder-filter: "*.exe,*.dll,*.pyd"
           file-digest: sha256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: sha256

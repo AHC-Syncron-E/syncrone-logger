@@ -1,0 +1,173 @@
+name: Build MSIX Installer
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  # CRITICAL: This MUST match the "Subject" of your Azure Signing Certificate exactly.
+  # If your cert says "CN=Autonomous Healthcare Inc.", put that here.
+  PUBLISHER_NAME: "CN=Autonomous Healthcare Inc., O=Autonomous Healthcare Inc., L=Santa Clara, S=California, C=US"
+  APP_NAME: "SyncronE"
+  VERSION: "1.0.0.0"
+
+jobs:
+  build-msix:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # --- 1. Setup Environment ---
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install Dependencies
+        run: |
+          pip install nuitka zstandard
+          pip install pyside6 numpy pyqtgraph pyserial
+
+      # --- 2. Compile with Nuitka ---
+      - name: Compile Standalone
+        run: |
+          python -m nuitka --standalone `
+            --assume-yes-for-downloads `
+            --enable-plugin=pyside6 `
+            --include-module=PySide6.QtOpenGL `
+            --include-module=PySide6.QtOpenGLWidgets `
+            --windows-icon-from-ico=icon.ico `
+            --windows-console-mode=disable `
+            --output-dir=build `
+            --company-name="Autonomous Healthcare Inc." `
+            --product-name="Syncron-E" `
+            --file-version="${{ env.VERSION }}" `
+            --product-version="${{ env.VERSION }}" `
+            main.py
+
+          # Rename the dist folder to something clean for packaging
+          Move-Item -Path "build\main.dist" -Destination "payload"
+
+      # --- 3. Sign the Inner Executable ---
+      # Essential for WDAC compliance inside the container
+      # --- REPLACED: Recursive Signing for Maximum Compatibility ---
+      - name: Sign EVERYTHING (DLLs, PYDs, EXEs)
+        uses: azure/artifact-signing-action@v1
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_CODE_SIGNING_NAME }}
+          certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE_NAME }}
+          # Target the folder containing your loose files
+          files-folder: main.dist
+          # Recursively match all binary extensions
+          files-folder-filter: "*.exe,*.dll,*.pyd"
+          file-digest: sha256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: sha256
+
+      # --- 4. Prepare MSIX Assets (Manifest & Images) ---
+      - name: Generate Manifest and Assets
+        run: |
+          $payloadDir = "payload"
+          $assetsDir = "$payloadDir\Assets"
+          New-Item -ItemType Directory -Force -Path $assetsDir
+
+          # A. Generate Required PNGs from your icon.ico using ImageMagick
+          # MSIX needs specific sizes. We verify magick exists first.
+          magick --version
+          
+          # Square 44x44 Logo
+          magick convert icon.ico -resize 44x44 "$assetsDir\Square44x44Logo.png"
+          # Square 150x150 Logo
+          magick convert icon.ico -resize 150x150 "$assetsDir\Square150x150Logo.png"
+          # Store Logo (50x50)
+          magick convert icon.ico -resize 50x50 "$assetsDir\StoreLogo.png"
+          # Splash Screen (Optional but good) - reusing 150x150 for simplicity
+          Copy-Item "$assetsDir\Square150x150Logo.png" "$assetsDir\SplashScreen.png"
+
+          # B. Generate AppxManifest.xml
+          # Note: The 'Identity Name' must be alphanumeric (no spaces).
+          # 'Publisher' must match your Cert Subject exactly.
+          $manifestContent = @"
+          <?xml version="1.0" encoding="utf-8"?>
+          <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10" 
+                   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10" 
+                   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities">
+            <Identity Name="${{ env.APP_NAME }}" 
+                      Publisher="${{ env.PUBLISHER_NAME }}" 
+                      Version="${{ env.VERSION }}" 
+                      ProcessorArchitecture="x64" />
+            <Properties>
+              <DisplayName>Syncron-E CD Logger</DisplayName>
+              <PublisherDisplayName>Autonomous Healthcare Inc.</PublisherDisplayName>
+              <Logo>Assets\StoreLogo.png</Logo>
+            </Properties>
+            <Resources>
+              <Resource Language="en-us" />
+            </Resources>
+            <Dependencies>
+              <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.22621.0" />
+            </Dependencies>
+            <Capabilities>
+              <rescap:Capability Name="runFullTrust" />
+            </Capabilities>
+            <Applications>
+              <Application Id="SyncronEApp" Executable="main.exe" EntryPoint="Windows.FullTrustApplication">
+                <uap:VisualElements 
+                  DisplayName="Syncron-E CD Logger" 
+                  Description="Syncron-E CD Logger Application" 
+                  BackgroundColor="transparent" 
+                  Square150x150Logo="Assets\Square150x150Logo.png" 
+                  Square44x44Logo="Assets\Square44x44Logo.png">
+                  <uap:SplashScreen Image="Assets\SplashScreen.png" />
+                </uap:VisualElements>
+              </Application>
+            </Applications>
+          </Package>
+          "@
+          Set-Content -Path "$payloadDir\AppxManifest.xml" -Value $manifestContent
+
+      # --- 5. Pack MSIX ---
+      - name: Create MSIX Package
+        run: |
+          # MakeAppx is available on windows-latest runners (part of Windows SDK)
+          $makeappx = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\makeappx.exe"
+          if (-not (Test-Path $makeappx)) {
+              # Fallback search if exact version changes
+              $makeappx = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\makeappx.exe" | Select-Object -First 1
+          }
+          
+          & $makeappx pack /d payload /p "Syncron-E.msix" /v
+
+      # --- 6. Sign the MSIX ---
+      - name: Sign MSIX Package
+        uses: azure/artifact-signing-action@v1
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_CODE_SIGNING_NAME }}
+          certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE_NAME }}
+          files-folder: .
+          files-folder-filter: "Syncron-E.msix"
+          file-digest: sha256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: sha256
+
+      # --- 7. Upload Artifact ---
+      - name: Upload MSIX
+        uses: actions/upload-artifact@v4
+        with:
+          name: Syncron-E-MSIX
+          path: "Syncron-E.msix"
