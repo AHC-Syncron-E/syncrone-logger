@@ -37,7 +37,6 @@ class DatabaseManager:
 
     def connect(self):
         # 1. Schema Check / Migration Strategy
-        # Before connecting, check if file exists and if it needs migration
         if self.db_path.exists():
             if self._needs_migration():
                 self._backup_and_reset()
@@ -45,26 +44,21 @@ class DatabaseManager:
         self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self.cursor = self.conn.cursor()
 
-        # WAL Mode is critical for concurrent reading/writing reliability
         self.conn.execute("PRAGMA journal_mode=WAL;")
         self.conn.execute("PRAGMA synchronous=NORMAL;")
         self._create_tables()
 
     def _needs_migration(self):
-        """Checks if the existing DB has the required columns."""
         try:
             temp_conn = sqlite3.connect(str(self.db_path))
             cursor = temp_conn.cursor()
-
-            # Check 'waveforms' table for 'parsed_pressure' column
             cursor.execute("PRAGMA table_info(waveforms)")
             columns = [info[1] for info in cursor.fetchall()]
             temp_conn.close()
 
             if "waveforms" not in self._get_tables(self.db_path):
-                return False  # Table doesn't exist yet, so no migration needed (create_tables will handle it)
+                return False
 
-            # If table exists but column is missing, we need migration
             if "parsed_pressure" not in columns:
                 return True
             return False
@@ -83,12 +77,11 @@ class DatabaseManager:
             return []
 
     def _backup_and_reset(self):
-        """Renames old DB to a backup file to allow fresh creation."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_name = self.db_path.parent / f"syncrone_backup_{timestamp}.db"
         try:
             shutil.move(str(self.db_path), str(backup_name))
-            print(f"[DB] Schema mismatch detected. Old DB backed up to: {backup_name.name}")
+            print(f"[DB] Schema mismatch. Backup created: {backup_name.name}")
         except Exception as e:
             print(f"[DB] Backup failed: {e}")
 
@@ -135,7 +128,6 @@ class DatabaseManager:
         self.conn.commit()
 
     def insert_waveform(self, session_id, raw_data, pressure=None, flow=None):
-        # NOTE: We do NOT commit here. We rely on the worker to call commit_batch() periodically.
         ts = datetime.now().isoformat()
         self.conn.execute(
             "INSERT INTO waveforms (session_id, timestamp, raw_data, parsed_pressure, parsed_flow) VALUES (?, ?, ?, ?, ?)",
@@ -148,11 +140,9 @@ class DatabaseManager:
             "INSERT INTO settings (session_id, timestamp, raw_data) VALUES (?, ?, ?)",
             (session_id, ts, raw_data)
         )
-        # Settings are rare (every 5s), so we CAN commit immediately for safety
         self.conn.commit()
 
     def commit_batch(self):
-        """Called periodically to save buffered waveform writes."""
         if self.conn:
             self.conn.commit()
 
@@ -162,13 +152,14 @@ class DatabaseManager:
 
 
 # -----------------------------------------------------------------------------
-# 2. WORKER THREAD (7-Day Stability Logic)
+# 2. WORKER THREAD
 # -----------------------------------------------------------------------------
 class VentilatorWorker(QThread):
     # Signals
     sig_status_update = Signal(str, str)
     sig_settings_msg = Signal(str)
     sig_waveform_data = Signal(float, float)
+    sig_breath_seq = Signal(str)  # New signal for Breath Index
     sig_error = Signal(str)
 
     def __init__(self, patient_id):
@@ -176,51 +167,39 @@ class VentilatorWorker(QThread):
         self.patient_id = patient_id
         self.is_running = False
 
-        # Serial Objects
         self.port_a = None
         self.port_b = None
         self.waveform_port = None
         self.settings_port = None
 
-        # Data Paths
         self.base_folder = Path.home() / "Desktop" / "Syncron-E Data"
         self.file_waveform = None
         self.file_settings = None
         self.db_manager = None
 
-        # Buffers
         self.buffer_a = ""
         self.buffer_b = ""
         self.waveform_line_buffer = ""
         self.settings_line_buffer = ""
         self.MAX_BUFFER_SIZE = 8192
 
-        # State (Used for identification only now)
-        self.current_pressure = 0.0
-
-        # File Rotation Tracking
-        self.current_file_date = None
         self.last_rotation_check = 0
+        self.current_file_date = None
 
-        # Supported Devices
         self.SUPPORTED_DEVICES = [
-            (0x0403, 0x6001),  # FTDI
-            (0x067B, 0x23A3),  # Prolific A
-            (0x067B, 0x2303),  # Prolific B
+            (0x0403, 0x6001),
+            (0x067B, 0x23A3),
+            (0x067B, 0x2303),
         ]
 
-        # Regex for identifying the Waveform port (looks for "BS, S:...")
         self.waveform_pattern = re.compile(r"BS,\s*S:(\d+),")
 
-    # --- File Management (Rotation) ---
+    # --- File Management ---
     def open_log_files(self):
-        """Opens log files based on current timestamp."""
         self.base_folder.mkdir(parents=True, exist_ok=True)
-
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.current_file_date = datetime.now().date()
 
-        # We append timestamp to ensure uniqueness on every start/rotation
         wf_name = f"waveforms_{timestamp}.txt"
         st_name = f"settings_{timestamp}.txt"
 
@@ -228,27 +207,19 @@ class VentilatorWorker(QThread):
         self.file_settings = open(self.base_folder / st_name, 'w', encoding='utf-8', buffering=1)
 
     def check_file_rotation(self):
-        """Checks if 24 hours have passed and rotates files if needed."""
         now = time.monotonic()
-        # Only check every 60 seconds to save CPU
         if now - self.last_rotation_check < 60:
             return
 
         self.last_rotation_check = now
         if datetime.now().date() > self.current_file_date:
-            # Day changed! Rotate.
             self.sig_status_update.emit("ROTATING FILES...", "#00aaff")
-
-            # Close old
             if self.file_waveform: self.file_waveform.close()
             if self.file_settings: self.file_settings.close()
-
-            # Open new
             self.open_log_files()
             self.sig_status_update.emit("LOGGING (Rotated)", "#00ff00")
 
     def safe_write_file(self, file_handle, data):
-        """Writes and flushes. Vital for crash recovery."""
         if file_handle:
             try:
                 file_handle.write(data)
@@ -260,22 +231,15 @@ class VentilatorWorker(QThread):
     # --- Setup & Cleanup ---
     def setup_system(self):
         self.base_folder.mkdir(parents=True, exist_ok=True)
-
-        # Database
         db_path = self.base_folder / "syncrone.db"
         self.db_manager = DatabaseManager(str(db_path))
         self.db_manager.connect()
-
-        # Files
         self.open_log_files()
 
     def close_system(self):
         if self.port_a and self.port_a.is_open: self.port_a.close()
         if self.port_b and self.port_b.is_open: self.port_b.close()
-
-        if self.db_manager:
-            self.db_manager.close()
-
+        if self.db_manager: self.db_manager.close()
         if self.file_waveform: self.file_waveform.close()
         if self.file_settings: self.file_settings.close()
 
@@ -312,7 +276,6 @@ class VentilatorWorker(QThread):
 
             dev_a, dev_b = found_devices[0], found_devices[1]
 
-            # Initialize
             self.setup_system()
 
             self.port_a = serial.Serial(dev_a, timeout=0)
@@ -323,13 +286,10 @@ class VentilatorWorker(QThread):
 
             self.sig_status_update.emit("IDENTIFYING PORTS...", "#00aaff")
 
-            # Loop State
             start_time = time.monotonic()
             last_serial_write = start_time
             last_db_commit = start_time
 
-            # We run the loop fast (250Hz) to ensure we don't block the serial buffer,
-            # but plotting is now event-driven, so loop speed matters less for visuals.
             loop_interval = 0.004
             next_wake_time = time.monotonic() + loop_interval
 
@@ -337,12 +297,9 @@ class VentilatorWorker(QThread):
 
             while self.is_running:
                 now = time.monotonic()
-
-                # 1. File Maintenance
                 self.check_file_rotation()
 
-                # 2. Read & Process
-                # IMPORTANT: We use latin-1 to safely handle all byte values (0-255)
+                # Read Port A
                 if self.port_a.in_waiting > 0:
                     data_a = self.port_a.read(self.port_a.in_waiting).decode('latin-1', errors='ignore')
                     if not ports_identified:
@@ -356,6 +313,7 @@ class VentilatorWorker(QThread):
                         else:
                             self.handle_settings(data_a)
 
+                # Read Port B
                 if self.port_b.in_waiting > 0:
                     data_b = self.port_b.read(self.port_b.in_waiting).decode('latin-1', errors='ignore')
                     if not ports_identified:
@@ -369,25 +327,22 @@ class VentilatorWorker(QThread):
                         else:
                             self.handle_settings(data_b)
 
-                # 3. Update UI
-                # Real signals are emitted inside process_waveform_buffer event-driven
-
-                # 4. Database Batch Commit (Every 1.0s)
+                # Database Commit
                 if now - last_db_commit >= 1.0:
                     self.db_manager.commit_batch()
                     last_db_commit = now
 
-                # 5. Write Command Message (Every 5s)
+                # Settings Polling
                 if ports_identified and (now - last_serial_write >= 5.0):
                     msg = "SNDF\r"
                     try:
                         self.settings_port.write(msg.encode('ascii'))
-                        self.settings_port.flush()  # Force transmission
+                        self.settings_port.flush()
                         last_serial_write = now
                     except Exception as e:
                         pass
 
-                # 6. Metronome
+                # Metronome
                 sleep_duration = next_wake_time - time.monotonic()
                 if sleep_duration > 0:
                     time.sleep(sleep_duration)
@@ -403,39 +358,27 @@ class VentilatorWorker(QThread):
             self.sig_status_update.emit("STOPPED", "#888888")
 
     def assign_ports(self, wave_port, set_port, init_buffer, name):
-        """Helper to lock in port roles."""
         self.waveform_port = wave_port
         self.settings_port = set_port
-
-        # Configure baud rates
         self.configure_port(self.settings_port, 9600)
-        # Waveform port stays at 38400
 
-        # Get actual COM port names (e.g. 'COM8') for clear display
         w_name = self.waveform_port.port
         s_name = self.settings_port.port
-
         status_msg = f"LOGGING | Waveforms: {w_name} | Settings: {s_name}"
         self.sig_status_update.emit(status_msg, "#00ff00")
 
-        # Process initial buffer
         self.safe_write_file(self.file_waveform, init_buffer)
         self.db_manager.insert_waveform(self.patient_id, init_buffer)
         self.process_waveform_buffer(init_buffer)
 
     def handle_waveform(self, data):
-        # PRIORITY 1: Safe storage fallback
         self.safe_write_file(self.file_waveform, data)
-
-        # PRIORITY 2: Parsing & Plotting
         try:
             parsed_vals = self.process_waveform_buffer(data)
-            # Store parsed data to DB if available, otherwise just raw
             p_val = parsed_vals[0] if parsed_vals else None
             f_val = parsed_vals[1] if parsed_vals else None
             self.db_manager.insert_waveform(self.patient_id, data, p_val, f_val)
         except Exception:
-            # If parsing crashes, we still have the file log
             self.db_manager.insert_waveform(self.patient_id, data)
 
     def handle_settings(self, data):
@@ -444,13 +387,6 @@ class VentilatorWorker(QThread):
         self.process_settings_buffer(data)
 
     def process_waveform_buffer(self, new_chunk):
-        """
-        Parses PB 980 waveform format:
-        Lines are either:
-        - "BS, S:xxxxx," (Breath Start)
-        - "flow, pressure" (e.g. "3.55, 5.13")
-        - "BE" (Breath End)
-        """
         self.waveform_line_buffer += new_chunk
 
         if len(self.waveform_line_buffer) > self.MAX_BUFFER_SIZE:
@@ -467,9 +403,15 @@ class VentilatorWorker(QThread):
                 if not clean:
                     continue
 
-                # We simply ignore BS (Start) and BE (End) lines for plotting
-                # But they are critical for the CSV file log (already handled in handle_waveform)
-                if clean.startswith("BS") or clean.startswith("BE"):
+                # Check for Breath Start (BS) to parse Sequence Number
+                if clean.startswith("BS"):
+                    match = self.waveform_pattern.search(clean)
+                    if match:
+                        seq_num = match.group(1)
+                        self.sig_breath_seq.emit(seq_num)
+                    continue
+
+                if clean.startswith("BE"):
                     continue
 
                 # Parse "Flow, Pressure"
@@ -478,12 +420,9 @@ class VentilatorWorker(QThread):
                     if len(parts) == 2:
                         flow = float(parts[0])
                         pressure = float(parts[1])
-
-                        # EMIT IMMEDIATELY (Event-Driven Plotting)
                         self.sig_waveform_data.emit(pressure, flow)
                         last_vals = (pressure, flow)
                 except ValueError:
-                    # Occasional noise or partial line
                     pass
 
             self.waveform_line_buffer = lines[-1]
@@ -538,7 +477,7 @@ class VentilatorApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Syncron-E Clinical Data Logger")
-        self.resize(1000, 750)
+        self.resize(1200, 800)  # Slightly wider for new labels
         self.setStyleSheet("background-color: #1e1e1e; color: #ffffff;")
         self.is_logging = False
 
@@ -561,7 +500,12 @@ class VentilatorApp(QMainWindow):
         self.status_dot.setStyleSheet("color: #888;")
 
         self.status_lbl = QLabel("READY")
-        self.status_lbl.setFont(QFont("Segoe UI", 14, QFont.Bold))  # Reduced font slightly for longer text
+        self.status_lbl.setFont(QFont("Segoe UI", 14, QFont.Bold))
+
+        # New Breath Index Label
+        self.seq_lbl = QLabel("Breath Index: --")
+        self.seq_lbl.setFont(QFont("Segoe UI", 14, QFont.Bold))
+        self.seq_lbl.setStyleSheet("color: #ffa500; margin-left: 20px;")  # Orange color for visibility
 
         self.mode_lbl = QLabel("Mode: --")
         self.mode_lbl.setFont(QFont("Segoe UI", 16, QFont.Bold))
@@ -569,6 +513,7 @@ class VentilatorApp(QMainWindow):
 
         h_layout.addWidget(self.status_dot)
         h_layout.addWidget(self.status_lbl)
+        h_layout.addWidget(self.seq_lbl)  # Add sequence label to header
         h_layout.addStretch()
         h_layout.addWidget(self.mode_lbl)
         h_layout.addSpacing(20)
@@ -579,22 +524,29 @@ class VentilatorApp(QMainWindow):
         pg.setConfigOptions(antialias=True)
         self.plot_widget = pg.GraphicsLayoutWidget()
 
-        # Pressure Plot (Auto-Ranging Enabled)
+        # X-Axis Time Array (Pre-calculated for performance)
+        # 500 samples * 0.02s interval = 10 seconds of history
+        self.data_len = 500
+        # This creates a list: [-10.0, -9.98, ... 0.0]
+        self.x_axis_data = [x * 0.02 for x in range(-self.data_len, 0)]
+
+        # Pressure Plot
         self.p_plot = self.plot_widget.addPlot(title="Pressure (cmH2O)")
-        self.p_plot.enableAutoRange(axis='y')  # Dynamic Scaling
+        self.p_plot.enableAutoRange(axis='y')
         self.p_plot.showGrid(x=True, y=True, alpha=0.3)
+        self.p_plot.setLabel('bottom', "Time", units='s')  # Label the time axis
         self.p_curve = self.p_plot.plot(pen=pg.mkPen('#00ff00', width=2))
 
         self.plot_widget.nextRow()
 
-        # Flow Plot (Auto-Ranging Enabled)
+        # Flow Plot
         self.f_plot = self.plot_widget.addPlot(title="Flow (L/min)")
-        self.f_plot.enableAutoRange(axis='y')  # Dynamic Scaling
+        self.f_plot.enableAutoRange(axis='y')
         self.f_plot.showGrid(x=True, y=True, alpha=0.3)
+        self.f_plot.setLabel('bottom', "Time", units='s')
         self.f_curve = self.f_plot.plot(pen=pg.mkPen('#ffff00', width=2))
 
-        # Memory Optimization: Deque (Store ~10 seconds of data at 50Hz)
-        self.data_len = 500
+        # Data Deques
         self.pressure_data = deque([0] * self.data_len, maxlen=self.data_len)
         self.flow_data = deque([0] * self.data_len, maxlen=self.data_len)
 
@@ -643,6 +595,7 @@ class VentilatorApp(QMainWindow):
             self.worker = VentilatorWorker(self.input_id.text().strip())
             self.worker.sig_status_update.connect(self.update_status)
             self.worker.sig_settings_msg.connect(self.mode_lbl.setText)
+            self.worker.sig_breath_seq.connect(self.update_breath_index)  # Connect new signal
             self.worker.sig_waveform_data.connect(self.update_plot)
             self.worker.sig_error.connect(lambda m: (self.worker.stop(), QMessageBox.critical(self, "Error", m)))
             self.worker.start()
@@ -663,12 +616,19 @@ class VentilatorApp(QMainWindow):
         self.status_lbl.setText(msg)
         self.status_dot.setStyleSheet(f"color: {color};")
 
+    @Slot(str)
+    def update_breath_index(self, seq_num):
+        """Updates the Breath Index label in the header."""
+        self.seq_lbl.setText(f"Breath Index: {seq_num}")
+
     @Slot(float, float)
     def update_plot(self, p, f):
         self.pressure_data.append(p)
         self.flow_data.append(f)
-        self.p_curve.setData(list(self.pressure_data))
-        self.f_curve.setData(list(self.flow_data))
+
+        # We pass the pre-calculated x_axis_data to ensure time scaling is correct
+        self.p_curve.setData(self.x_axis_data, list(self.pressure_data))
+        self.f_curve.setData(self.x_axis_data, list(self.flow_data))
 
 
 if __name__ == "__main__":
