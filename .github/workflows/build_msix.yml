@@ -43,6 +43,12 @@ jobs:
           echo "APP_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append
           Write-Host "Building Version: $ver"
 
+      # --- Inject Version into Python Source ---
+      - name: Inject Version into Code
+        run: |
+          $ver = "${{ env.APP_VERSION }}"
+          (Get-Content main.py).replace('APP_VERSION = "1.0.0 (Dev)"', "APP_VERSION = `"$ver`"") | Set-Content main.py
+
       # --- 2. Compile with Nuitka ---
       - name: Compile Standalone
         run: |

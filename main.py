@@ -26,6 +26,11 @@ from PySide6.QtGui import QFont, QIcon, QColor, QCloseEvent, QPixmap, QMouseEven
 # Graphing
 import pyqtgraph as pg
 
+# -----------------------------------------------------------------------------
+# GLOBAL CONSTANTS
+# -----------------------------------------------------------------------------
+APP_VERSION = "1.0.0 (Dev)"
+
 
 # -----------------------------------------------------------------------------
 # 0. HELPER UI CLASSES
@@ -393,7 +398,6 @@ class VentilatorWorker(QThread):
             self.sig_error.emit(f"Runtime Error: {e}")
         finally:
             self.close_system()
-            self.sig_status_update.emit("STOPPED", "#888888")
 
     def assign_ports(self, wave_port, set_port, init_buffer, name):
         self.waveform_port = wave_port
@@ -631,9 +635,12 @@ class VentilatorApp(QMainWindow):
         self.status_dot.setStyleSheet("color: #888;")
         self.status_lbl = QLabel("READY")
         self.status_lbl.setFont(QFont("Segoe UI", 14, QFont.Bold))
-        self.seq_lbl = QLabel("Breath Index: --")
-        self.seq_lbl.setFont(QFont("Segoe UI", 14, QFont.Bold))
-        self.seq_lbl.setStyleSheet("color: #ffa500; margin-left: 20px;")
+
+        self.seq_lbl = QLabel()
+        self.seq_lbl.setText(
+            "<html><head/><body><span style='font-weight:600; color:#ffa500;'>Breath Index:</span> <span style='font-weight:400; color:#ffffff;'>--</span></body></html>")
+        self.seq_lbl.setFont(QFont("Segoe UI", 14))
+        self.seq_lbl.setStyleSheet("margin-left: 20px;")
         self.seq_lbl.setToolTip("The sequence number of the most recent breath, as assigned by the ventilator.")
 
         rx_font = QFont("Segoe UI", 10, QFont.Bold)
@@ -662,7 +669,7 @@ class VentilatorApp(QMainWindow):
             lambda: self.led_b.setStyleSheet("background-color: #111; border-radius: 8px; border: 1px solid #555;"))
 
         self.mode_lbl = QLabel("Mode: --")
-        self.mode_lbl.setFont(QFont("Segoe UI", 16, QFont.Bold))
+        self.mode_lbl.setFont(QFont("Segoe UI", 16))
         self.mode_lbl.setStyleSheet("color: #00aaff;")
 
         h_layout.addWidget(self.status_dot)
@@ -732,7 +739,7 @@ class VentilatorApp(QMainWindow):
         ig_layout.setContentsMargins(0, 0, 0, 0)
         ig_layout.setSpacing(2)
         lbl_id = QLabel("Patient ID:")
-        lbl_id.setStyleSheet("color: #aaa; font-size: 10px;")
+        lbl_id.setStyleSheet("color: #aaa; font-size: 13px; font-weight: bold;")
         self.input_id = QLineEdit()
         self.input_id.setPlaceholderText("Enter Patient ID to Enable Recording...")
         self.input_id.setToolTip("Unique identifier for the patient session.")
@@ -747,7 +754,7 @@ class VentilatorApp(QMainWindow):
         cg_layout.setContentsMargins(0, 0, 0, 0)
         cg_layout.setSpacing(2)
         lbl_auto = QLabel("Auto-Stop Rule:")
-        lbl_auto.setStyleSheet("color: #aaa; font-size: 10px;")
+        lbl_auto.setStyleSheet("color: #aaa; font-size: 13px; font-weight: bold;")
         self.combo_stop = QComboBox()
         self.combo_stop.setToolTip("Automatically stop recording after a specific duration or breath count.")
         self.combo_stop.setStyleSheet(
@@ -778,36 +785,51 @@ class VentilatorApp(QMainWindow):
 
         r2_layout = QHBoxLayout()
         dash_font_lbl = QFont("Segoe UI", 10)
-        dash_font_val = QFont("Segoe UI", 12, QFont.Bold)
+        dash_font_val = QFont("Segoe UI", 22, QFont.Bold)
 
-        def make_dash_item(label, initial_val, tooltip):
+        # UPDATED: Added color parameter and alignment fixes
+        def make_dash_item(label, initial_val, tooltip, color="#ffffff"):
             w = QWidget()
             w.setToolTip(tooltip)
             vl = QVBoxLayout(w)
             vl.setSpacing(2)
+
             l = QLabel(label)
             l.setFont(dash_font_lbl)
             l.setStyleSheet("color: #aaa;")
+            # UPDATED: Force labels to have same height to align across widgets
+            l.setFixedHeight(25)
+            l.setAlignment(Qt.AlignBottom | Qt.AlignHCenter)
+
             v = QLabel(initial_val)
             v.setFont(dash_font_val)
-            v.setStyleSheet("color: white;")
-            vl.addWidget(l, 0, Qt.AlignCenter)
-            vl.addWidget(v, 0, Qt.AlignCenter)
+            # UPDATED: Apply color and center alignment
+            v.setStyleSheet(f"color: {color};")
+            v.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
+
+            vl.addWidget(l)
+            vl.addWidget(v)
             return w, v
 
         w_started, self.lbl_started = make_dash_item("STARTED:", "--",
-                                                     "The exact date and time the first waveform data packet was received.")
+                                                     "The exact date and time the first waveform data packet was received.",
+                                                     "#ffffff")  # White
+
         w_duration, self.lbl_duration = make_dash_item("DURATION:", "00:00:00",
-                                                       "The total time elapsed since valid waveform data began recording.")
+                                                       "The total time elapsed since valid waveform data began recording.",
+                                                       "#00e5ff")  # Cyan (Timer)
+
         w_breaths, self.lbl_breaths = make_dash_item("BREATHS RECORDED:", "0",
-                                                     "The total number of complete breaths captured during this recording session.")
+                                                     "The total number of complete breaths captured during this recording session.",
+                                                     "#ffa500")  # Orange (Breath Markers)
 
         # Calculate initial disk space immediately
         initial_bytes = self.check_disk_space()
         gb = initial_bytes / (1024 ** 3)
         days = (initial_bytes / 5120) / 86400
-        w_disk, self.lbl_disk = make_dash_item("DISK SPACE:", f"~{days:.1f} Days Free ({gb:.0f} GB)",
-                                               "Estimates how many days of recording are supported by your current free disk space.")
+        w_disk, self.lbl_disk = make_dash_item("DISK SPACE:", f"~{days:.1f} Days Free\n({gb:.0f} GB)",
+                                               "Estimates how many days of recording are supported by your current free disk space.",
+                                               "#ccff99")  # Pastel Green (Safe)
 
         r2_layout.addWidget(w_started)
         r2_layout.addWidget(w_duration)
@@ -824,7 +846,7 @@ class VentilatorApp(QMainWindow):
     def show_about_dialog(self):
         msg = QMessageBox(self)
         msg.setWindowTitle("About")
-        msg.setText("<b>Syncron-E Waveform Recorder</b>")
+        msg.setText(f"<b>Syncron-E Waveform Recorder</b><br>v{APP_VERSION}")
         msg.setInformativeText("Autonomous Healthcare, Inc.<br><br>Support: support@autonomoushealthcare.com")
         msg.setIcon(QMessageBox.Information)
         msg.exec()
@@ -914,7 +936,7 @@ class VentilatorApp(QMainWindow):
 
             self.worker = VentilatorWorker(self.input_id.text().strip())
             self.worker.sig_status_update.connect(self.update_status)
-            self.worker.sig_settings_msg.connect(self.mode_lbl.setText)
+            self.worker.sig_settings_msg.connect(self.update_mode_display)
             self.worker.sig_breath_seq.connect(self.update_breath_index)
             self.worker.sig_waveform_data.connect(self.update_plot)
             self.worker.sig_rx_activity.connect(self.on_rx_activity)
@@ -937,13 +959,14 @@ class VentilatorApp(QMainWindow):
         self.combo_stop.setEnabled(not self.is_locked)
         self.btn_action.setText("START RECORDING")
 
-        # MODIFIED: Determine final status but do NOT reset Dashboard labels
+        stop_time_str = datetime.now().strftime("%I:%M %p")
+
         if "Limit" in reason:
-            self.update_status("COMPLETE (Limit Reached)", "#00ff00")
+            self.update_status(f"COMPLETE at {stop_time_str} (Limit Reached)", "#00ff00")
         elif "Disk" in reason:
-            self.update_status("STOPPED (Low Disk)", "#ff0000")
+            self.update_status(f"STOPPED at {stop_time_str} (Low Disk)", "#ff0000")
         else:
-            self.update_status("STOPPED (User Request)", "#888888")
+            self.update_status(f"STOPPED at {stop_time_str} (User Request)", "#888888")
 
         self.log_debug(f"Stopped. Reason: {reason}")
 
@@ -951,6 +974,17 @@ class VentilatorApp(QMainWindow):
             self.check_input()
         else:
             self.btn_action.setStyleSheet("background-color: #333; color: #666;")
+
+    @Slot(str)
+    def update_mode_display(self, text):
+        if "Mode:" in text:
+            parts = text.split("Mode:", 1)
+            if len(parts) > 1:
+                val = parts[1].strip()
+                html = f"<html><head/><body><span style='font-weight:600; color:#00aaff;'>Mode:</span> <span style='font-weight:400; color:#ffffff;'>{val}</span></body></html>"
+                self.mode_lbl.setText(html)
+        else:
+            self.mode_lbl.setText(text)
 
     @Slot(str, str)
     def update_status(self, msg, color):
@@ -960,7 +994,9 @@ class VentilatorApp(QMainWindow):
 
     @Slot(str)
     def update_breath_index(self, seq_num):
-        self.seq_lbl.setText(f"Breath Index: {seq_num}")
+        html = f"<html><head/><body><span style='font-weight:600; color:#ffa500;'>Breath Index:</span> <span style='font-weight:400; color:#ffffff;'>#{seq_num}</span></body></html>"
+        self.seq_lbl.setText(html)
+
         self.p_markers.add_marker(seq_num)
         self.f_markers.add_marker(seq_num)
         if self.is_logging and self.has_data_started:
@@ -1037,7 +1073,7 @@ class VentilatorApp(QMainWindow):
         remaining_sec = free_bytes / rate
         days = remaining_sec / 86400
         gb = free_bytes / (1024 ** 3)
-        self.lbl_disk.setText(f"~{days:.1f} Days Free ({gb:.0f} GB)")
+        self.lbl_disk.setText(f"~{days:.1f} Days Free\n({gb:.0f} GB)")
 
 
 if __name__ == "__main__":
