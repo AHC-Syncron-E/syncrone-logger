@@ -802,9 +802,11 @@ class VentilatorApp(QMainWindow):
         w_breaths, self.lbl_breaths = make_dash_item("BREATHS RECORDED:", "0",
                                                      "The total number of complete breaths captured during this recording session.")
 
+        # Calculate initial disk space immediately
         initial_bytes = self.check_disk_space()
+        gb = initial_bytes / (1024 ** 3)
         days = (initial_bytes / 5120) / 86400
-        w_disk, self.lbl_disk = make_dash_item("DISK SPACE:", f"~{days:.1f} Days Free",
+        w_disk, self.lbl_disk = make_dash_item("DISK SPACE:", f"~{days:.1f} Days Free ({gb:.0f} GB)",
                                                "Estimates how many days of recording are supported by your current free disk space.")
 
         r2_layout.addWidget(w_started)
@@ -935,10 +937,13 @@ class VentilatorApp(QMainWindow):
         self.combo_stop.setEnabled(not self.is_locked)
         self.btn_action.setText("START RECORDING")
 
-        self.status_lbl.setText("READY")
-        self.status_dot.setStyleSheet("color: #888;")
-        self.lbl_started.setText("--")
-        self.lbl_duration.setText("00:00:00")
+        # MODIFIED: Determine final status but do NOT reset Dashboard labels
+        if "Limit" in reason:
+            self.update_status("COMPLETE (Limit Reached)", "#00ff00")
+        elif "Disk" in reason:
+            self.update_status("STOPPED (Low Disk)", "#ff0000")
+        else:
+            self.update_status("STOPPED (User Request)", "#888888")
 
         self.log_debug(f"Stopped. Reason: {reason}")
 
@@ -1031,7 +1036,8 @@ class VentilatorApp(QMainWindow):
         rate = 5120
         remaining_sec = free_bytes / rate
         days = remaining_sec / 86400
-        self.lbl_disk.setText(f"~{days:.1f} Days Free")
+        gb = free_bytes / (1024 ** 3)
+        self.lbl_disk.setText(f"~{days:.1f} Days Free ({gb:.0f} GB)")
 
 
 if __name__ == "__main__":
