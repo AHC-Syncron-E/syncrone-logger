@@ -159,8 +159,11 @@ class VentilatorWorker(QThread):
     sig_status_update = Signal(str, str)
     sig_settings_msg = Signal(str)
     sig_waveform_data = Signal(float, float)
-    sig_breath_seq = Signal(str)  # New signal for Breath Index
+    sig_breath_seq = Signal(str)
     sig_error = Signal(str)
+
+    # New Signal: Activity Indicator (Payload: "A" or "B")
+    sig_rx_activity = Signal(str)
 
     def __init__(self, patient_id):
         super().__init__()
@@ -205,6 +208,18 @@ class VentilatorWorker(QThread):
 
         self.file_waveform = open(self.base_folder / wf_name, 'w', encoding='utf-8', buffering=1)
         self.file_settings = open(self.base_folder / st_name, 'w', encoding='utf-8', buffering=1)
+
+    def log_unidentified_data(self, source_port, data):
+        """Logs raw data during the identification phase to help debug format issues."""
+        try:
+            debug_file = self.base_folder / "startup_debug_log.txt"
+            with open(debug_file, "a", encoding='utf-8') as f:
+                # Escaping newlines so one packet equals one line in the debug file
+                clean_data = data.replace('\n', '\\n').replace('\r', '\\r')
+                timestamp = datetime.now().strftime("%H:%M:%S.%f")
+                f.write(f"[{timestamp}] [{source_port}] {clean_data}\n")
+        except Exception as e:
+            print(f"Debug write failed: {e}")
 
     def check_file_rotation(self):
         now = time.monotonic()
@@ -302,7 +317,14 @@ class VentilatorWorker(QThread):
                 # Read Port A
                 if self.port_a.in_waiting > 0:
                     data_a = self.port_a.read(self.port_a.in_waiting).decode('latin-1', errors='ignore')
+
+                    # 1. Fire Activity Signal (Visual Feedback)
+                    self.sig_rx_activity.emit("A")
+
                     if not ports_identified:
+                        # 2. Log Debug Data (Observability)
+                        self.log_unidentified_data("PORT_A", data_a)
+
                         self.buffer_a += data_a
                         if self.waveform_pattern.search(self.buffer_a):
                             self.assign_ports(self.port_a, self.port_b, self.buffer_a, "A")
@@ -316,7 +338,14 @@ class VentilatorWorker(QThread):
                 # Read Port B
                 if self.port_b.in_waiting > 0:
                     data_b = self.port_b.read(self.port_b.in_waiting).decode('latin-1', errors='ignore')
+
+                    # 1. Fire Activity Signal (Visual Feedback)
+                    self.sig_rx_activity.emit("B")
+
                     if not ports_identified:
+                        # 2. Log Debug Data (Observability)
+                        self.log_unidentified_data("PORT_B", data_b)
+
                         self.buffer_b += data_b
                         if self.waveform_pattern.search(self.buffer_b):
                             self.assign_ports(self.port_b, self.port_a, self.buffer_b, "B")
@@ -477,7 +506,7 @@ class VentilatorApp(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Syncron-E Clinical Data Logger")
-        self.resize(1200, 800)  # Slightly wider for new labels
+        self.resize(1200, 800)
         self.setStyleSheet("background-color: #1e1e1e; color: #ffffff;")
         self.is_logging = False
 
@@ -502,10 +531,35 @@ class VentilatorApp(QMainWindow):
         self.status_lbl = QLabel("READY")
         self.status_lbl.setFont(QFont("Segoe UI", 14, QFont.Bold))
 
-        # New Breath Index Label
         self.seq_lbl = QLabel("Breath Index: --")
         self.seq_lbl.setFont(QFont("Segoe UI", 14, QFont.Bold))
-        self.seq_lbl.setStyleSheet("color: #ffa500; margin-left: 20px;")  # Orange color for visibility
+        self.seq_lbl.setStyleSheet("color: #ffa500; margin-left: 20px;")
+
+        # --- NEW: RX LEDs Setup ---
+        rx_font = QFont("Segoe UI", 10, QFont.Bold)
+
+        # RX A Label & LED
+        lbl_rx_a = QLabel("RX A:")
+        lbl_rx_a.setFont(rx_font)
+        self.led_a = QLabel()
+        self.led_a.setFixedSize(16, 16)
+        self.led_a.setStyleSheet("background-color: #111; border-radius: 8px; border: 1px solid #555;")
+        self.led_a_timer = QTimer()
+        self.led_a_timer.setSingleShot(True)
+        self.led_a_timer.timeout.connect(
+            lambda: self.led_a.setStyleSheet("background-color: #111; border-radius: 8px; border: 1px solid #555;"))
+
+        # RX B Label & LED
+        lbl_rx_b = QLabel("RX B:")
+        lbl_rx_b.setFont(rx_font)
+        self.led_b = QLabel()
+        self.led_b.setFixedSize(16, 16)
+        self.led_b.setStyleSheet("background-color: #111; border-radius: 8px; border: 1px solid #555;")
+        self.led_b_timer = QTimer()
+        self.led_b_timer.setSingleShot(True)
+        self.led_b_timer.timeout.connect(
+            lambda: self.led_b.setStyleSheet("background-color: #111; border-radius: 8px; border: 1px solid #555;"))
+        # ---------------------------
 
         self.mode_lbl = QLabel("Mode: --")
         self.mode_lbl.setFont(QFont("Segoe UI", 16, QFont.Bold))
@@ -513,7 +567,16 @@ class VentilatorApp(QMainWindow):
 
         h_layout.addWidget(self.status_dot)
         h_layout.addWidget(self.status_lbl)
-        h_layout.addWidget(self.seq_lbl)  # Add sequence label to header
+        h_layout.addWidget(self.seq_lbl)
+
+        # Add RX Indicators to Header
+        h_layout.addSpacing(40)
+        h_layout.addWidget(lbl_rx_a)
+        h_layout.addWidget(self.led_a)
+        h_layout.addSpacing(15)
+        h_layout.addWidget(lbl_rx_b)
+        h_layout.addWidget(self.led_b)
+
         h_layout.addStretch()
         h_layout.addWidget(self.mode_lbl)
         h_layout.addSpacing(20)
@@ -524,17 +587,15 @@ class VentilatorApp(QMainWindow):
         pg.setConfigOptions(antialias=True)
         self.plot_widget = pg.GraphicsLayoutWidget()
 
-        # X-Axis Time Array (Pre-calculated for performance)
-        # 500 samples * 0.02s interval = 10 seconds of history
+        # X-Axis Time Array
         self.data_len = 500
-        # This creates a list: [-10.0, -9.98, ... 0.0]
         self.x_axis_data = [x * 0.02 for x in range(-self.data_len, 0)]
 
         # Pressure Plot
         self.p_plot = self.plot_widget.addPlot(title="Pressure (cmH2O)")
         self.p_plot.enableAutoRange(axis='y')
         self.p_plot.showGrid(x=True, y=True, alpha=0.3)
-        self.p_plot.setLabel('bottom', "Time", units='s')  # Label the time axis
+        self.p_plot.setLabel('bottom', "Time", units='s')
         self.p_curve = self.p_plot.plot(pen=pg.mkPen('#00ff00', width=2))
 
         self.plot_widget.nextRow()
@@ -595,8 +656,9 @@ class VentilatorApp(QMainWindow):
             self.worker = VentilatorWorker(self.input_id.text().strip())
             self.worker.sig_status_update.connect(self.update_status)
             self.worker.sig_settings_msg.connect(self.mode_lbl.setText)
-            self.worker.sig_breath_seq.connect(self.update_breath_index)  # Connect new signal
+            self.worker.sig_breath_seq.connect(self.update_breath_index)
             self.worker.sig_waveform_data.connect(self.update_plot)
+            self.worker.sig_rx_activity.connect(self.on_rx_activity)  # Connect new LED signal
             self.worker.sig_error.connect(lambda m: (self.worker.stop(), QMessageBox.critical(self, "Error", m)))
             self.worker.start()
 
@@ -618,15 +680,24 @@ class VentilatorApp(QMainWindow):
 
     @Slot(str)
     def update_breath_index(self, seq_num):
-        """Updates the Breath Index label in the header."""
         self.seq_lbl.setText(f"Breath Index: {seq_num}")
+
+    @Slot(str)
+    def on_rx_activity(self, port_id):
+        """Flashes the corresponding LED green for 50ms on data receipt."""
+        style_on = "background-color: #00ff00; border-radius: 8px; border: 1px solid #555;"
+
+        if port_id == "A":
+            self.led_a.setStyleSheet(style_on)
+            self.led_a_timer.start(50)
+        elif port_id == "B":
+            self.led_b.setStyleSheet(style_on)
+            self.led_b_timer.start(50)
 
     @Slot(float, float)
     def update_plot(self, p, f):
         self.pressure_data.append(p)
         self.flow_data.append(f)
-
-        # We pass the pre-calculated x_axis_data to ensure time scaling is correct
         self.p_curve.setData(self.x_axis_data, list(self.pressure_data))
         self.f_curve.setData(self.x_axis_data, list(self.flow_data))
 
