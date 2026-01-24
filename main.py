@@ -24,6 +24,7 @@ from PySide6.QtGui import QFont, QIcon, QColor
 
 # Graphing
 import pyqtgraph as pg
+import numpy as np
 
 
 # -----------------------------------------------------------------------------
@@ -152,7 +153,7 @@ class DatabaseManager:
 
 
 # -----------------------------------------------------------------------------
-# 2. MARKER MANAGEMENT (New Feature: Sticky Annotations)
+# 2. MARKER MANAGEMENT (Sticky Annotations)
 # -----------------------------------------------------------------------------
 class BreathMarker:
     """ Represents a single breath annotation (Vertical Line + Text) that moves with the graph. """
@@ -160,17 +161,13 @@ class BreathMarker:
     def __init__(self, plot_item, seq_num, y_offset=0):
         self.plot_item = plot_item
         self.seq_num = seq_num
-        self.age_samples = 0  # Integer tracking to prevent float drift
+        self.age_samples = 0
         self.sample_interval = 0.02
 
-        # 1. Vertical Line (Anchor)
         self.line = pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen('#555', width=1, style=Qt.DashLine))
-
-        # 2. Text Label
         self.text = pg.TextItem(text=f"#{seq_num}", anchor=(0, 1), color="#ffa500")
-        self.text.setPos(0, y_offset)  # Initial position
+        self.text.setPos(0, y_offset)
 
-        # Add to Scene
         self.plot_item.addItem(self.line)
         self.plot_item.addItem(self.text)
 
@@ -180,18 +177,15 @@ class BreathMarker:
         x_pos = -(self.age_samples * self.sample_interval)
 
         self.line.setPos(x_pos)
-        # We keep Y constant, only updating X
         self.text.setPos(x_pos, self.text.y())
         return x_pos
 
     def set_label(self, new_text, color=None):
-        """ Updates the text (e.g., from external API). """
         self.text.setText(new_text)
         if color:
             self.text.setColor(color)
 
     def destroy(self):
-        """ Explicit cleanup to prevent memory leaks over 7+ days. """
         try:
             self.plot_item.removeItem(self.line)
             self.plot_item.removeItem(self.text)
@@ -206,42 +200,33 @@ class BreathMarkerManager:
         self.plot_item = plot_item
         self.name = name
         self.log_callback = log_callback
-        self.markers = {}  # Dict[seq_num, BreathMarker]
+        self.markers = {}
 
     def add_marker(self, seq_num, y_offset=0):
         if seq_num in self.markers:
-            return  # Prevent duplicates
+            return
 
         try:
             marker = BreathMarker(self.plot_item, seq_num, y_offset)
             self.markers[seq_num] = marker
-            # Optional: self.log(f"Spawned marker #{seq_num}")
         except Exception as e:
             self.log(f"Failed to spawn marker: {e}")
 
     def update_all(self):
-        """ Called every time the graph ticks. Moves markers left. """
         expired_ids = []
-
-        # Move Markers
         for seq_num, marker in self.markers.items():
             x_pos = marker.update_position()
-
-            # Boundary check (X < -10.0 seconds)
             if x_pos < -10.0:
                 expired_ids.append(seq_num)
 
-        # Cleanup Expired
         for seq_num in expired_ids:
             self.markers[seq_num].destroy()
             del self.markers[seq_num]
 
     def update_annotation(self, seq_num, text, color=None):
-        """ External API Hook """
         if seq_num in self.markers:
             self.markers[seq_num].set_label(text, color)
         else:
-            # Observability: Log if we are trying to annotate a breath that is already gone
             self.log(f"Missed annotation for #{seq_num} (Expired/Unknown)")
 
     def log(self, msg):
@@ -255,7 +240,6 @@ class BreathMarkerManager:
 # 3. WORKER THREAD
 # -----------------------------------------------------------------------------
 class VentilatorWorker(QThread):
-    # Signals
     sig_status_update = Signal(str, str)
     sig_settings_msg = Signal(str)
     sig_waveform_data = Signal(float, float)
@@ -295,7 +279,6 @@ class VentilatorWorker(QThread):
 
         self.waveform_pattern = re.compile(r"BS,\s*S:(\d+),")
 
-    # --- File Management ---
     def open_log_files(self):
         self.base_folder.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -308,7 +291,6 @@ class VentilatorWorker(QThread):
         self.file_settings = open(self.base_folder / st_name, 'w', encoding='utf-8', buffering=1)
 
     def log_unidentified_data(self, source_port, data):
-        """Logs raw data during the identification phase to help debug format issues."""
         try:
             debug_file = self.base_folder / "startup_debug_log.txt"
             with open(debug_file, "a", encoding='utf-8') as f:
@@ -340,7 +322,6 @@ class VentilatorWorker(QThread):
             except Exception as e:
                 print(f"Write failed: {e}")
 
-    # --- Setup & Cleanup ---
     def setup_system(self):
         self.base_folder.mkdir(parents=True, exist_ok=True)
         db_path = self.base_folder / "syncrone.db"
@@ -373,7 +354,6 @@ class VentilatorWorker(QThread):
                     break
         return sorted(list(set(valid_devices)))
 
-    # --- Main Loop ---
     def run(self):
         self.is_running = True
 
@@ -521,7 +501,6 @@ class VentilatorWorker(QThread):
                 if not clean:
                     continue
 
-                # Check for Breath Start (BS)
                 if clean.startswith("BS"):
                     match = self.waveform_pattern.search(clean)
                     if match:
@@ -532,7 +511,6 @@ class VentilatorWorker(QThread):
                 if clean.startswith("BE"):
                     continue
 
-                # Parse "Flow, Pressure"
                 try:
                     parts = clean.split(',')
                     if len(parts) == 2:
@@ -598,6 +576,13 @@ class VentilatorApp(QMainWindow):
         self.resize(1200, 800)
         self.setStyleSheet("background-color: #1e1e1e; color: #ffffff;")
         self.is_logging = False
+
+        # Watchdog State for Silence Detection
+        self.last_pkt_time = 0
+        self.is_in_silence = False
+        self.watchdog_timer = QTimer()
+        self.watchdog_timer.setInterval(20)  # 50Hz check
+        self.watchdog_timer.timeout.connect(self.check_watchdog)
 
         if Path("icon.ico").exists():
             self.setWindowIcon(QIcon("icon.ico"))
@@ -672,26 +657,22 @@ class VentilatorApp(QMainWindow):
         self.data_len = 500
         self.x_axis_data = [x * 0.02 for x in range(-self.data_len, 0)]
 
-        # Pressure Plot
+        # Pressure Plot (Added connect="finite" for breaks in line)
         self.p_plot = self.plot_widget.addPlot(title="Pressure (cmH2O)")
         self.p_plot.enableAutoRange(axis='y')
         self.p_plot.showGrid(x=True, y=True, alpha=0.3)
         self.p_plot.setLabel('bottom', "Time", units='s')
-        self.p_curve = self.p_plot.plot(pen=pg.mkPen('#00ff00', width=2))
-
-        # Initialize Marker Manager for Pressure
+        self.p_curve = self.p_plot.plot(pen=pg.mkPen('#00ff00', width=2), connect="finite")
         self.p_markers = BreathMarkerManager(self.p_plot, "PressureMarkers", self.log_debug)
 
         self.plot_widget.nextRow()
 
-        # Flow Plot
+        # Flow Plot (Added connect="finite" for breaks in line)
         self.f_plot = self.plot_widget.addPlot(title="Flow (L/min)")
         self.f_plot.enableAutoRange(axis='y')
         self.f_plot.showGrid(x=True, y=True, alpha=0.3)
         self.f_plot.setLabel('bottom', "Time", units='s')
-        self.f_curve = self.f_plot.plot(pen=pg.mkPen('#ffff00', width=2))
-
-        # Initialize Marker Manager for Flow
+        self.f_curve = self.f_plot.plot(pen=pg.mkPen('#ffff00', width=2), connect="finite")
         self.f_markers = BreathMarkerManager(self.f_plot, "FlowMarkers", self.log_debug)
 
         # Data Deques
@@ -730,7 +711,6 @@ class VentilatorApp(QMainWindow):
             pass
 
     def log_debug(self, msg):
-        """ Used by Marker Managers to log issues safely. """
         try:
             log_path = Path.home() / "Desktop" / "Syncron-E Data" / "error_log.txt"
             with open(log_path, "a") as f:
@@ -762,8 +742,14 @@ class VentilatorApp(QMainWindow):
             self.input_id.setEnabled(False)
             self.btn_action.setText("STOP")
             self.btn_action.setStyleSheet("background-color: #cc3300; color: white; border-radius: 5px;")
+
+            # Start Watchdog
+            self.last_pkt_time = time.monotonic()
+            self.is_in_silence = False
+            self.watchdog_timer.start()
         else:
             if hasattr(self, 'worker'): self.worker.stop()
+            self.watchdog_timer.stop()
             self.is_logging = False
             self.input_id.setEnabled(True)
             self.btn_action.setText("START LOGGING")
@@ -777,7 +763,6 @@ class VentilatorApp(QMainWindow):
     @Slot(str)
     def update_breath_index(self, seq_num):
         self.seq_lbl.setText(f"Breath Index: {seq_num}")
-        # Add new markers at x=0
         self.p_markers.add_marker(seq_num, y_offset=0)
         self.f_markers.add_marker(seq_num, y_offset=0)
 
@@ -793,14 +778,46 @@ class VentilatorApp(QMainWindow):
 
     @Slot(float, float)
     def update_plot(self, p, f):
+        # 1. Reset Watchdog
+        self.last_pkt_time = time.monotonic()
+        if self.is_in_silence:
+            self.is_in_silence = False
+            self.log_debug("Signal Restored.")
+            self.update_status("LOGGING", "#00ff00")
+
+        # 2. Add real data
         self.pressure_data.append(p)
         self.flow_data.append(f)
         self.p_curve.setData(self.x_axis_data, list(self.pressure_data))
         self.f_curve.setData(self.x_axis_data, list(self.flow_data))
 
-        # Scroll markers based on strict integer age tracking
+        # 3. Move Markers
         self.p_markers.update_all()
         self.f_markers.update_all()
+
+    def check_watchdog(self):
+        """ Runs at 50Hz. Checks if data has stopped. If so, inserts NaN to create gap. """
+        if not self.is_logging:
+            return
+
+        elapsed = time.monotonic() - self.last_pkt_time
+        if elapsed > 0.1:  # 100ms Silence Threshold
+            if not self.is_in_silence:
+                self.is_in_silence = True
+                self.log_debug("Signal Lost (Silence detected > 100ms).")
+                self.update_status("SIGNAL LOST", "#ff0000")
+
+            # Feed NaN (Not a Number) to break the line and scroll graph
+            self.pressure_data.append(float('nan'))
+            self.flow_data.append(float('nan'))
+
+            # Update Graph with finite connection enabled
+            self.p_curve.setData(self.x_axis_data, list(self.pressure_data))
+            self.f_curve.setData(self.x_axis_data, list(self.flow_data))
+
+            # Ensure markers continue to scroll off-screen
+            self.p_markers.update_all()
+            self.f_markers.update_all()
 
 
 if __name__ == "__main__":
