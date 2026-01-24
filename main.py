@@ -28,7 +28,7 @@ import pyqtgraph as pg
 
 
 # -----------------------------------------------------------------------------
-# 1. DATABASE MANAGER (Robust Schema Handling)
+# 1. DATABASE MANAGER
 # -----------------------------------------------------------------------------
 class DatabaseManager:
     def __init__(self, db_path):
@@ -43,7 +43,6 @@ class DatabaseManager:
 
         self.conn = sqlite3.connect(str(self.db_path), check_same_thread=False)
         self.cursor = self.conn.cursor()
-
         self.conn.execute("PRAGMA journal_mode=WAL;")
         self.conn.execute("PRAGMA synchronous=NORMAL;")
         self._create_tables()
@@ -55,14 +54,10 @@ class DatabaseManager:
             cursor.execute("PRAGMA table_info(waveforms)")
             columns = [info[1] for info in cursor.fetchall()]
             temp_conn.close()
-
-            if "waveforms" not in self._get_tables(self.db_path):
-                return False
-
-            if "parsed_pressure" not in columns:
-                return True
+            if "waveforms" not in self._get_tables(self.db_path): return False
+            if "parsed_pressure" not in columns: return True
             return False
-        except Exception:
+        except:
             return False
 
     def _get_tables(self, path):
@@ -81,9 +76,8 @@ class DatabaseManager:
         backup_name = self.db_path.parent / f"syncrone_backup_{timestamp}.db"
         try:
             shutil.move(str(self.db_path), str(backup_name))
-            print(f"[DB] Schema mismatch. Backup created: {backup_name.name}")
-        except Exception as e:
-            print(f"[DB] Backup failed: {e}")
+        except:
+            pass
 
     def _create_tables(self):
         self.conn.execute("""
@@ -107,7 +101,6 @@ class DatabaseManager:
                           )
                           """)
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_wf_sess ON waveforms (session_id);")
-
         self.conn.execute("""
                           CREATE TABLE IF NOT EXISTS settings
                           (
@@ -136,23 +129,19 @@ class DatabaseManager:
 
     def insert_setting(self, session_id, raw_data):
         ts = datetime.now().isoformat()
-        self.conn.execute(
-            "INSERT INTO settings (session_id, timestamp, raw_data) VALUES (?, ?, ?)",
-            (session_id, ts, raw_data)
-        )
+        self.conn.execute("INSERT INTO settings (session_id, timestamp, raw_data) VALUES (?, ?, ?)",
+                          (session_id, ts, raw_data))
         self.conn.commit()
 
     def commit_batch(self):
-        if self.conn:
-            self.conn.commit()
+        if self.conn: self.conn.commit()
 
     def close(self):
-        if self.conn:
-            self.conn.close()
+        if self.conn: self.conn.close()
 
 
 # -----------------------------------------------------------------------------
-# 2. MARKER MANAGEMENT (Sticky Annotations)
+# 2. MARKER MANAGEMENT
 # -----------------------------------------------------------------------------
 class BreathMarker:
     def __init__(self, plot_item, seq_num, y_offset=0):
@@ -160,11 +149,9 @@ class BreathMarker:
         self.seq_num = seq_num
         self.age_samples = 0
         self.sample_interval = 0.02
-
         self.line = pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen('#555', width=1, style=Qt.DashLine))
         self.text = pg.TextItem(text=f"#{seq_num}", anchor=(0, 1), color="#ffa500")
         self.text.setPos(0, y_offset)
-
         self.plot_item.addItem(self.line)
         self.plot_item.addItem(self.text)
 
@@ -179,33 +166,28 @@ class BreathMarker:
         try:
             self.plot_item.removeItem(self.line)
             self.plot_item.removeItem(self.text)
-        except Exception:
+        except:
             pass
 
 
 class BreathMarkerManager:
-    def __init__(self, plot_item, name="Manager", log_callback=None):
+    def __init__(self, plot_item, name="Manager"):
         self.plot_item = plot_item
-        self.name = name
-        self.log_callback = log_callback
         self.markers = {}
 
     def add_marker(self, seq_num, y_offset=0):
-        if seq_num in self.markers:
-            return
+        if seq_num in self.markers: return
         try:
             marker = BreathMarker(self.plot_item, seq_num, y_offset)
             self.markers[seq_num] = marker
-        except Exception as e:
-            if self.log_callback: self.log_callback(f"Marker Error: {e}")
+        except:
+            pass
 
     def update_all(self):
         expired_ids = []
         for seq_num, marker in self.markers.items():
             x_pos = marker.update_position()
-            if x_pos < -10.0:
-                expired_ids.append(seq_num)
-
+            if x_pos < -10.0: expired_ids.append(seq_num)
         for seq_num in expired_ids:
             self.markers[seq_num].destroy()
             del self.markers[seq_num]
@@ -226,31 +208,22 @@ class VentilatorWorker(QThread):
         super().__init__()
         self.patient_id = patient_id
         self.is_running = False
-
         self.port_a = None
         self.port_b = None
         self.waveform_port = None
         self.settings_port = None
-
         self.base_folder = Path.home() / "Desktop" / "Syncron-E Data"
         self.file_waveform = None
         self.file_settings = None
         self.db_manager = None
-
         self.buffer_a = ""
         self.buffer_b = ""
         self.waveform_line_buffer = ""
         self.settings_line_buffer = ""
         self.MAX_BUFFER_SIZE = 8192
-
         self.last_rotation_check = 0
         self.current_file_date = None
-
-        self.SUPPORTED_DEVICES = [
-            (0x0403, 0x6001),
-            (0x067B, 0x23A3),
-            (0x067B, 0x2303),
-        ]
+        self.SUPPORTED_DEVICES = [(0x0403, 0x6001), (0x067B, 0x23A3), (0x067B, 0x2303)]
         self.waveform_pattern = re.compile(r"BS,\s*S:(\d+),")
 
     def open_log_files(self):
@@ -266,23 +239,22 @@ class VentilatorWorker(QThread):
         try:
             debug_file = self.base_folder / "startup_debug_log.txt"
             with open(debug_file, "a", encoding='utf-8') as f:
-                clean_data = data.replace('\n', '\\n').replace('\r', '\\r')
-                timestamp = datetime.now().strftime("%H:%M:%S.%f")
-                f.write(f"[{timestamp}] [{source_port}] {clean_data}\n")
-        except Exception:
+                clean = data.replace('\n', '\\n').replace('\r', '\\r')
+                ts = datetime.now().strftime("%H:%M:%S.%f")
+                f.write(f"[{ts}] [{source_port}] {clean}\n")
+        except:
             pass
 
     def check_file_rotation(self):
         now = time.monotonic()
-        if now - self.last_rotation_check < 60:
-            return
+        if now - self.last_rotation_check < 60: return
         self.last_rotation_check = now
         if datetime.now().date() > self.current_file_date:
             self.sig_status_update.emit("ROTATING FILES...", "#00aaff")
             if self.file_waveform: self.file_waveform.close()
             if self.file_settings: self.file_settings.close()
             self.open_log_files()
-            self.sig_status_update.emit("LOGGING (Rotated)", "#00ff00")
+            self.sig_status_update.emit("RECORDING (Rotated files)", "#00ff00")
 
     def safe_write_file(self, file_handle, data):
         if file_handle:
@@ -290,8 +262,8 @@ class VentilatorWorker(QThread):
                 file_handle.write(data)
                 file_handle.flush()
                 os.fsync(file_handle.fileno())
-            except Exception as e:
-                print(f"Write failed: {e}")
+            except:
+                pass
 
     def setup_system(self):
         self.base_folder.mkdir(parents=True, exist_ok=True)
@@ -332,12 +304,10 @@ class VentilatorWorker(QThread):
             found_devices = self.get_valid_ports()
             if len(found_devices) < 2:
                 self.sig_error.emit(f"Found {len(found_devices)} cable(s).\nNeed exactly 2.")
-                self.sig_status_update.emit("CONNECTION FAILED", "#ff0000")
                 return
 
             dev_a, dev_b = found_devices[0], found_devices[1]
             self.setup_system()
-
             self.port_a = serial.Serial(dev_a, timeout=0)
             self.configure_port(self.port_a, 38400)
             self.port_b = serial.Serial(dev_b, timeout=0)
@@ -349,14 +319,13 @@ class VentilatorWorker(QThread):
             last_serial_write = start_time
             last_db_commit = start_time
             loop_interval = 0.004
-            next_wake_time = time.monotonic() + loop_interval
+            next_wake = time.monotonic() + loop_interval
             ports_identified = False
 
             while self.is_running:
                 now = time.monotonic()
                 self.check_file_rotation()
 
-                # Port A
                 if self.port_a.in_waiting > 0:
                     data_a = self.port_a.read(self.port_a.in_waiting).decode('latin-1', errors='ignore')
                     self.sig_rx_activity.emit("A")
@@ -372,7 +341,6 @@ class VentilatorWorker(QThread):
                         else:
                             self.handle_settings(data_a)
 
-                # Port B
                 if self.port_b.in_waiting > 0:
                     data_b = self.port_b.read(self.port_b.in_waiting).decode('latin-1', errors='ignore')
                     self.sig_rx_activity.emit("B")
@@ -388,12 +356,10 @@ class VentilatorWorker(QThread):
                         else:
                             self.handle_settings(data_b)
 
-                # Commit DB
                 if now - last_db_commit >= 1.0:
                     self.db_manager.commit_batch()
                     last_db_commit = now
 
-                # Poll Settings
                 if ports_identified and (now - last_serial_write >= 5.0):
                     msg = "SNDF\r"
                     try:
@@ -403,13 +369,12 @@ class VentilatorWorker(QThread):
                     except:
                         pass
 
-                # Metronome
-                sleep_duration = next_wake_time - time.monotonic()
+                sleep_duration = next_wake - time.monotonic()
                 if sleep_duration > 0:
                     time.sleep(sleep_duration)
                 else:
-                    next_wake_time = time.monotonic()
-                next_wake_time += loop_interval
+                    next_wake = time.monotonic()
+                next_wake += loop_interval
 
         except Exception as e:
             self.log_crash(e)
@@ -424,8 +389,7 @@ class VentilatorWorker(QThread):
         self.configure_port(self.settings_port, 9600)
         w_name = self.waveform_port.port
         s_name = self.settings_port.port
-        self.sig_status_update.emit(f"LOGGING | Wave: {w_name} | Set: {s_name}", "#00ff00")
-
+        self.sig_status_update.emit(f"RECORDING | Wave: {w_name} | Set: {s_name}", "#00ff00")
         self.safe_write_file(self.file_waveform, init_buffer)
         self.db_manager.insert_waveform(self.patient_id, init_buffer)
         self.process_waveform_buffer(init_buffer)
@@ -433,10 +397,10 @@ class VentilatorWorker(QThread):
     def handle_waveform(self, data):
         self.safe_write_file(self.file_waveform, data)
         try:
-            parsed_vals = self.process_waveform_buffer(data)
-            p_val = parsed_vals[0] if parsed_vals else None
-            f_val = parsed_vals[1] if parsed_vals else None
-            self.db_manager.insert_waveform(self.patient_id, data, p_val, f_val)
+            parsed = self.process_waveform_buffer(data)
+            p = parsed[0] if parsed else None
+            f = parsed[1] if parsed else None
+            self.db_manager.insert_waveform(self.patient_id, data, p, f)
         except:
             self.db_manager.insert_waveform(self.patient_id, data)
 
@@ -458,8 +422,7 @@ class VentilatorWorker(QThread):
                 if not clean: continue
                 if clean.startswith("BS"):
                     match = self.waveform_pattern.search(clean)
-                    if match:
-                        self.sig_breath_seq.emit(match.group(1))
+                    if match: self.sig_breath_seq.emit(match.group(1))
                     continue
                 if clean.startswith("BE"): continue
                 try:
@@ -490,16 +453,14 @@ class VentilatorWorker(QThread):
                             mode = parts[7].strip()
                             mandatory = parts[8].strip()
                             spont = parts[9].strip()
-                            raw_str = f"Mode: {mandatory} {spont} {mode}"
-                            self.sig_settings_msg.emit(" ".join(raw_str.split()))
+                            self.sig_settings_msg.emit(f"Mode: {mandatory} {spont} {mode}")
                     except:
                         pass
             self.settings_line_buffer = lines[-1]
 
     def log_crash(self, e):
         try:
-            log_path = self.base_folder / "error_log.txt"
-            with open(log_path, "a") as f:
+            with open(self.base_folder / "error_log.txt", "a") as f:
                 f.write(f"\n[CRASH {datetime.now()}] {str(e)}\n{traceback.format_exc()}\n")
         except:
             pass
@@ -515,19 +476,18 @@ class VentilatorWorker(QThread):
 class VentilatorApp(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Syncron-E Clinical Data Logger")
-        self.resize(1200, 900)
+        self.setWindowTitle("Syncron-E Waveform Recorder")
         self.setStyleSheet("background-color: #1e1e1e; color: #ffffff;")
 
+        # Application State
         self.is_logging = False
         self.is_locked = False
+        self.has_data_started = False  # Latches True when first waveform packet arrives
+
         self.session_start_time = None
         self.session_breath_count = 0
-
-        # Disk Monitoring
         self.start_disk_space = 0
 
-        # Safety / Config
         self.base_folder = Path.home() / "Desktop" / "Syncron-E Data"
         self.base_folder.mkdir(parents=True, exist_ok=True)
         self.auto_stop_options = self.load_config()
@@ -539,7 +499,7 @@ class VentilatorApp(QMainWindow):
         self.watchdog_timer.setInterval(20)  # 50Hz
         self.watchdog_timer.timeout.connect(self.check_watchdog)
 
-        # 1Hz UI Timer (Clock, Disk, Checks)
+        # 1Hz UI Timer
         self.ui_timer = QTimer()
         self.ui_timer.setInterval(1000)
         self.ui_timer.timeout.connect(self.update_ui_dashboard)
@@ -556,10 +516,7 @@ class VentilatorApp(QMainWindow):
             pass
 
     def load_config(self):
-        """ Robust config loader with self-healing capabilities. """
         config_path = self.base_folder / ".config.json"
-
-        # Default Configuration
         defaults = [
             {"label": "Manual Stop (Unlimited)", "type": "manual", "value": 0},
             {"label": "1 Hour", "type": "time", "value": 3600},
@@ -583,27 +540,13 @@ class VentilatorApp(QMainWindow):
         try:
             with open(config_path, "r") as f:
                 data = json.load(f)
-
-            # Validation
             options = data.get("options", [])
-            if not isinstance(options, list) or len(options) == 0:
-                raise ValueError("Invalid options list")
-
-            for item in options:
-                if not all(k in item for k in ("label", "type", "value")):
-                    raise ValueError("Missing keys in option")
-                if item["type"] not in ["manual", "time", "breaths"]:
-                    raise ValueError("Invalid type")
-
+            if not isinstance(options, list) or len(options) == 0: raise ValueError
             return options
-
-        except Exception as e:
-            # Self-Healing
-            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            corrupt_name = self.base_folder / f".config_CORRUPT_{timestamp}.json"
-            shutil.move(str(config_path), str(corrupt_name))
+        except:
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            shutil.move(str(config_path), str(self.base_folder / f".config_CORRUPT_{ts}.json"))
             save_defaults()
-            self.log_debug(f"Config corrupted ({e}). Restored defaults.")
             return defaults
 
     def log_debug(self, msg):
@@ -628,12 +571,10 @@ class VentilatorApp(QMainWindow):
         self.status_dot.setStyleSheet("color: #888;")
         self.status_lbl = QLabel("READY")
         self.status_lbl.setFont(QFont("Segoe UI", 14, QFont.Bold))
-
         self.seq_lbl = QLabel("Breath Index: --")
         self.seq_lbl.setFont(QFont("Segoe UI", 14, QFont.Bold))
         self.seq_lbl.setStyleSheet("color: #ffa500; margin-left: 20px;")
 
-        # RX LEDs
         rx_font = QFont("Segoe UI", 10, QFont.Bold)
         self.led_a = QLabel()
         self.led_a.setFixedSize(16, 16)
@@ -678,26 +619,24 @@ class VentilatorApp(QMainWindow):
         self.p_plot = self.plot_widget.addPlot(title="Pressure (cmH2O)")
         self.p_plot.showGrid(x=True, y=True, alpha=0.3)
         self.p_curve = self.p_plot.plot(pen=pg.mkPen('#00ff00', width=2), connect="finite")
-        self.p_markers = BreathMarkerManager(self.p_plot, "Pressure", self.log_debug)
+        self.p_markers = BreathMarkerManager(self.p_plot)
 
         self.plot_widget.nextRow()
 
         self.f_plot = self.plot_widget.addPlot(title="Flow (L/min)")
         self.f_plot.showGrid(x=True, y=True, alpha=0.3)
         self.f_curve = self.f_plot.plot(pen=pg.mkPen('#ffff00', width=2), connect="finite")
-        self.f_markers = BreathMarkerManager(self.f_plot, "Flow", self.log_debug)
+        self.f_markers = BreathMarkerManager(self.f_plot)
 
         self.pressure_data = deque([0] * self.data_len, maxlen=self.data_len)
         self.flow_data = deque([0] * self.data_len, maxlen=self.data_len)
 
-        # --- Footer (Clinical Dashboard) ---
+        # Footer
         footer = QFrame()
         footer.setStyleSheet("background-color: #2b2b2b; border-radius: 5px;")
         f_main_layout = QVBoxLayout(footer)
 
-        # Row 1: Interactive
         r1_layout = QHBoxLayout()
-
         self.input_id = QLineEdit()
         self.input_id.setPlaceholderText("Enter Patient ID...")
         self.input_id.setStyleSheet("padding: 10px; font-size: 14px; color: white; border: 1px solid #555;")
@@ -706,10 +645,9 @@ class VentilatorApp(QMainWindow):
         self.combo_stop = QComboBox()
         self.combo_stop.setStyleSheet(
             "padding: 10px; font-size: 14px; color: white; background: #333; border: 1px solid #555;")
-        for opt in self.auto_stop_options:
-            self.combo_stop.addItem(opt["label"], opt)
+        for opt in self.auto_stop_options: self.combo_stop.addItem(opt["label"], opt)
 
-        self.btn_action = QPushButton("START LOGGING")
+        self.btn_action = QPushButton("START RECORDING")
         self.btn_action.setMinimumHeight(60)
         self.btn_action.setFont(QFont("Segoe UI", 16, QFont.Bold))
         self.btn_action.setStyleSheet("background-color: #444; color: #888; border-radius: 5px;")
@@ -727,12 +665,10 @@ class VentilatorApp(QMainWindow):
         r1_layout.addWidget(self.btn_action, 3)
         r1_layout.addWidget(self.btn_lock, 1)
 
-        # Row 2: Status Dashboard
         r2_layout = QHBoxLayout()
         dash_font_lbl = QFont("Segoe UI", 10)
         dash_font_val = QFont("Segoe UI", 12, QFont.Bold)
 
-        # Helper to make dashboard box
         def make_dash_item(label, initial_val):
             w = QWidget()
             vl = QVBoxLayout(w)
@@ -747,7 +683,6 @@ class VentilatorApp(QMainWindow):
             vl.addWidget(v, 0, Qt.AlignCenter)
             return w, v
 
-        # FIX: Keep references to widgets (w_) so they aren't garbage collected
         w_started, self.lbl_started = make_dash_item("STARTED:", "--")
         w_duration, self.lbl_duration = make_dash_item("DURATION:", "00:00:00")
         w_breaths, self.lbl_breaths = make_dash_item("BREATHS RECORDED:", "0")
@@ -766,7 +701,6 @@ class VentilatorApp(QMainWindow):
         layout.addWidget(footer, 2)
 
     def closeEvent(self, event: QCloseEvent):
-        """ Safety Override: Prevent accidental closing. """
         if self.is_logging or self.is_locked:
             msg = "Recording in progress!" if self.is_logging else "App is LOCKED."
             QMessageBox.warning(self, "Cannot Close", f"{msg}\nPlease stop logging/unlock first.")
@@ -776,25 +710,35 @@ class VentilatorApp(QMainWindow):
 
     def toggle_lock(self):
         self.is_locked = not self.is_locked
+
+        # 1. GRAPH INTERACTION (The fix for zoom/pan)
+        self.p_plot.getViewBox().setMouseEnabled(x=not self.is_locked, y=not self.is_locked)
+        self.f_plot.getViewBox().setMouseEnabled(x=not self.is_locked, y=not self.is_locked)
+
         if self.is_locked:
             self.btn_lock.setText("🔒 UNLOCK")
             self.btn_lock.setStyleSheet("background-color: #cc3300; color: white;")
+
+            # 2. BUTTON VISUALS (The fix for Stop Button Color)
+            if self.is_logging:
+                # Dim the Stop button so it looks disabled
+                self.btn_action.setStyleSheet("background-color: #333; color: #666; border-radius: 5px;")
+
             self.btn_action.setEnabled(False)
             self.input_id.setEnabled(False)
             self.combo_stop.setEnabled(False)
-            self.log_debug("App LOCKED by user.")
         else:
             self.btn_lock.setText("🔒 LOCK APP")
             self.btn_lock.setStyleSheet("background-color: #555; color: white;")
-            self.input_id.setEnabled(not self.is_logging)
-            self.combo_stop.setEnabled(not self.is_logging)
 
-            # Re-evaluate start/stop button state
             if self.is_logging:
-                self.btn_action.setEnabled(True)  # Can Stop
+                # Restore Stop button color
+                self.btn_action.setStyleSheet("background-color: #cc3300; color: white; border-radius: 5px;")
+                self.btn_action.setEnabled(True)
             else:
-                self.check_input()  # Can Start if ID present
-            self.log_debug("App UNLOCKED by user.")
+                self.check_input()
+                self.input_id.setEnabled(True)
+                self.combo_stop.setEnabled(True)
 
     def check_input(self):
         if self.is_logging or self.is_locked: return
@@ -806,68 +750,65 @@ class VentilatorApp(QMainWindow):
             self.btn_action.setStyleSheet("background-color: #444; color: #888; border-radius: 5px;")
 
     def check_disk_space(self):
-        """ Returns free space in bytes. """
         try:
             return shutil.disk_usage(str(self.base_folder)).free
         except:
             return 0
 
+    def handle_worker_error(self, msg):
+        """ Handles error signals cleanly to prevent 'Zombie Logging' state. """
+        self.worker.stop()
+        QMessageBox.critical(self, "Connection Error", msg)
+        self.stop_logging_procedure("Error: " + msg)
+
     def toggle_logging(self):
         if not self.is_logging:
-            # --- Pre-Flight Safety Checks ---
+            # Pre-Flight Checks
             free_bytes = self.check_disk_space()
-            opt = self.combo_stop.currentData()
-
-            # 1. Critical Space Check (<500MB)
             if free_bytes < 500 * 1024 * 1024:
-                QMessageBox.critical(self, "Disk Full", "Critically low disk space (<500MB).\nCannot start recording.")
+                QMessageBox.critical(self, "Disk Full", "Critically low disk space (<500MB).")
                 return
 
-            # 2. Duration Prediction Check
+            opt = self.combo_stop.currentData()
             if opt["type"] == "time":
-                # Est: 5KB/sec * Duration * 1.2 buffer
                 needed = opt["value"] * 5120 * 1.2
                 if free_bytes < needed:
-                    days_avail = free_bytes / (5120 * 86400)
-                    msg = f"Insufficient disk space for requested duration.\n\nRequested: {opt['label']}\nAvailable: ~{days_avail:.1f} Days\n\nStart anyway?"
-                    reply = QMessageBox.question(self, "Space Warning", msg, QMessageBox.Yes | QMessageBox.No)
-                    if reply == QMessageBox.No:
-                        return
+                    msg = f"Insufficient disk space for {opt['label']}.\nStart anyway?"
+                    if QMessageBox.question(self, "Space Warning", msg,
+                                            QMessageBox.Yes | QMessageBox.No) == QMessageBox.No: return
 
-            # --- Start ---
+            # --- ARMING PHASE ---
+            self.is_logging = True
+            self.has_data_started = False  # Timer will not tick until this is True
             self.session_breath_count = 0
-            self.session_start_time = datetime.now()
             self.start_disk_space = free_bytes
 
-            # UI Updates
-            self.lbl_started.setText(self.session_start_time.strftime("%b %d @ %I:%M %p"))
+            # UI: Waiting State
+            self.lbl_started.setText("WAITING FOR DATA...")
+            self.lbl_duration.setText("WAITING...")
             self.lbl_breaths.setText("0")
+
             self.input_id.setEnabled(False)
             self.combo_stop.setEnabled(False)
-            self.btn_action.setText("STOP LOGGING")
+            self.btn_action.setText("STOP RECORDING")
             self.btn_action.setStyleSheet("background-color: #cc3300; color: white; border-radius: 5px;")
 
-            # Start Worker
             self.worker = VentilatorWorker(self.input_id.text().strip())
             self.worker.sig_status_update.connect(self.update_status)
             self.worker.sig_settings_msg.connect(self.mode_lbl.setText)
             self.worker.sig_breath_seq.connect(self.update_breath_index)
             self.worker.sig_waveform_data.connect(self.update_plot)
             self.worker.sig_rx_activity.connect(self.on_rx_activity)
-            self.worker.sig_error.connect(lambda m: (self.worker.stop(), QMessageBox.critical(self, "Error", m)))
+            # FIX: Use dedicated handler for clean reset
+            self.worker.sig_error.connect(self.handle_worker_error)
+
             self.worker.start()
 
-            self.is_logging = True
-            self.log_debug(f"Session Started. Auto-Stop: {opt['label']}")
-
-            # Timers
+            # Timers (Watchdog starts now, UI timer waits for data)
             self.last_pkt_time = time.monotonic()
             self.is_in_silence = False
             self.watchdog_timer.start()
-            self.ui_timer.start()
-
         else:
-            # --- Stop ---
             self.stop_logging_procedure("User Request")
 
     def stop_logging_procedure(self, reason):
@@ -878,15 +819,22 @@ class VentilatorApp(QMainWindow):
         self.is_logging = False
         self.input_id.setEnabled(not self.is_locked)
         self.combo_stop.setEnabled(not self.is_locked)
-        self.btn_action.setText("START LOGGING")
+        self.btn_action.setText("START RECORDING")
 
-        self.log_debug(f"Session Stopped. Reason: {reason}")
-        if "Limit" in reason:
-            self.update_status("COMPLETE (Limit Reached)", "#00ff00")
-        elif "Disk" in reason:
-            self.update_status("STOPPED (Low Disk)", "#ff0000")
-        else:
+        # FIX: Full Status Reset
+        self.status_lbl.setText("READY")
+        self.status_dot.setStyleSheet("color: #888;")
+        self.lbl_started.setText("--")
+        self.lbl_duration.setText("00:00:00")
+
+        self.log_debug(f"Stopped. Reason: {reason}")
+
+        # Only check input/enable buttons if we aren't locked
+        if not self.is_locked:
             self.check_input()
+        else:
+            # If stopped while locked (e.g. auto-stop), visuals need to update
+            self.btn_action.setStyleSheet("background-color: #333; color: #666;")
 
     @Slot(str, str)
     def update_status(self, msg, color):
@@ -898,12 +846,9 @@ class VentilatorApp(QMainWindow):
         self.seq_lbl.setText(f"Breath Index: {seq_num}")
         self.p_markers.add_marker(seq_num)
         self.f_markers.add_marker(seq_num)
-
-        # Clinical Counter & Auto-Stop
-        if self.is_logging:
+        if self.is_logging and self.has_data_started:
             self.session_breath_count += 1
             self.lbl_breaths.setText(f"{self.session_breath_count:,}")
-
             opt = self.combo_stop.currentData()
             if opt["type"] == "breaths" and self.session_breath_count >= opt["value"]:
                 self.stop_logging_procedure(f"Breath Limit ({opt['value']})")
@@ -921,10 +866,19 @@ class VentilatorApp(QMainWindow):
     @Slot(float, float)
     def update_plot(self, p, f):
         self.last_pkt_time = time.monotonic()
+
+        # --- FIX: Start Duration Timer only on first Data Packet ---
+        if not self.has_data_started:
+            self.has_data_started = True
+            self.session_start_time = datetime.now()
+            self.lbl_started.setText(self.session_start_time.strftime("%b %d @ %I:%M %p"))
+            self.ui_timer.start()
+            self.update_status("RECORDING", "#00ff00")
+        # -----------------------------------------------------------
+
         if self.is_in_silence:
             self.is_in_silence = False
-            self.log_debug("Signal Restored.")
-            self.update_status("LOGGING", "#00ff00")
+            self.update_status("RECORDING", "#00ff00")
 
         self.pressure_data.append(p)
         self.flow_data.append(f)
@@ -938,9 +892,7 @@ class VentilatorApp(QMainWindow):
         if time.monotonic() - self.last_pkt_time > 0.1:
             if not self.is_in_silence:
                 self.is_in_silence = True
-                self.log_debug("Signal Lost (>100ms).")
                 self.update_status("SIGNAL LOST", "#ff0000")
-
             self.pressure_data.append(float('nan'))
             self.flow_data.append(float('nan'))
             self.p_curve.setData(self.x_axis_data, list(self.pressure_data))
@@ -949,38 +901,25 @@ class VentilatorApp(QMainWindow):
             self.f_markers.update_all()
 
     def update_ui_dashboard(self):
-        """ 1Hz Timer: Clocks, Auto-Stop Check, Disk Check. """
-        if not self.is_logging: return
+        if not self.is_logging or not self.has_data_started: return
 
-        # 1. Duration Update
         now = datetime.now()
         elapsed = now - self.session_start_time
-        self.lbl_duration.setText(str(elapsed).split('.')[0])  # HH:MM:SS
+        self.lbl_duration.setText(str(elapsed).split('.')[0])
 
-        # 2. Time Limit Auto-Stop
         opt = self.combo_stop.currentData()
         if opt["type"] == "time":
             if elapsed.total_seconds() >= opt["value"]:
                 self.stop_logging_procedure(f"Time Limit ({opt['label']})")
                 return
 
-        # 3. Disk Space & Red Line
         free_bytes = self.check_disk_space()
-
-        # Red Line Check (<500MB)
         if free_bytes < 500 * 1024 * 1024:
             self.stop_logging_procedure("CRITICAL LOW DISK")
-            QMessageBox.critical(self, "Stopped",
-                                 "Recording stopped automatically to preserve file integrity.\nDisk Space < 500MB.")
+            QMessageBox.critical(self, "Stopped", "Disk Space < 500MB.")
             return
 
-        # Adaptive Estimation
-        # Initial safe rate: 5KB/s. After 5 mins, calculate actual rate.
         rate = 5120
-        if elapsed.total_seconds() > 300:
-            # Just a rough heuristic based on typical usage to refine the display
-            pass
-
         remaining_sec = free_bytes / rate
         days = remaining_sec / 86400
         self.lbl_disk.setText(f"~{days:.1f} Days Left")
@@ -990,8 +929,7 @@ if __name__ == "__main__":
     def exception_hook(exctype, value, tb):
         error_msg = "".join(traceback.format_exception(exctype, value, tb))
         try:
-            log_path = Path.home() / "Desktop" / "Syncron-E Data" / "error_log.txt"
-            with open(log_path, "a") as f:
+            with open(Path.home() / "Desktop" / "Syncron-E Data" / "error_log.txt", "a") as f:
                 f.write(f"\n[GUI CRASH {datetime.now()}]\n{error_msg}\n")
         except:
             pass
@@ -1001,5 +939,6 @@ if __name__ == "__main__":
     sys.excepthook = exception_hook
     app = QApplication(sys.argv)
     window = VentilatorApp()
-    window.show()
+    # FIX: Open Maximized
+    window.showMaximized()
     sys.exit(app.exec())

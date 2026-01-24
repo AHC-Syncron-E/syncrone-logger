@@ -1,6 +1,6 @@
-# Syncron-E Clinical Data Logger
+# Syncron-E Waveform Recorder
 
-**Syncron-E Clinical Data Logger** is a PySide6-based application for logging clinical data from PB 980 ventilators. It is packaged as a self-extracting executable designed for restricted hospital IT environments (Windows 10/11).
+**Syncron-E Waveform Recorder** is a PySide6-based application for logging clinical data from PB 980 ventilators. It is packaged as a self-extracting executable designed for restricted hospital IT environments (Windows 10/11).
 
 ![License](https://img.shields.io/badge/license-Proprietary-red)
 ![Platform](https://img.shields.io/badge/platform-Windows_x64-blue)
