@@ -11,10 +11,10 @@ permissions:
 
 env:
   # CRITICAL: This MUST match the "Subject" of your Azure Signing Certificate exactly.
-  # If your cert says "CN=Autonomous Healthcare Inc.", put that here.
   PUBLISHER_NAME: "CN=Autonomous Healthcare Inc., O=Autonomous Healthcare Inc., L=Santa Clara, S=California, C=US"
   APP_NAME: "SyncronE"
-  VERSION: "1.0.0.0"
+  # Base version (Major.Minor.Patch). The 4th digit will be the GitHub Run Number.
+  VERSION_PREFIX: "1.0.0"
 
 jobs:
   build-msix:
@@ -35,6 +35,14 @@ jobs:
           pip install nuitka zstandard
           pip install pyside6 numpy pyqtgraph pyserial
 
+      # --- NEW: Set Dynamic Version ---
+      # Combines "1.0.0" + "RunNumber" (e.g. 45) -> "1.0.0.45"
+      - name: Set App Version
+        run: |
+          $ver = "${{ env.VERSION_PREFIX }}.${{ github.run_number }}"
+          echo "APP_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "Building Version: $ver"
+
       # --- 2. Compile with Nuitka ---
       - name: Compile Standalone
         run: |
@@ -48,15 +56,14 @@ jobs:
             --output-dir=build `
             --company-name="Autonomous Healthcare Inc." `
             --product-name="Syncron-E Waveform Recorder" `
-            --file-version="${{ env.VERSION }}" `
-            --product-version="${{ env.VERSION }}" `
+            --file-version="${{ env.APP_VERSION }}" `
+            --product-version="${{ env.APP_VERSION }}" `
             main.py
 
           # Rename the dist folder to something clean for packaging
           Move-Item -Path "build\main.dist" -Destination "payload"
 
       # --- 3. Sign the Inner Executable ---
-      # Essential for WDAC compliance inside the container
       - name: Sign EVERYTHING (DLLs, PYDs, EXEs)
         uses: azure/artifact-signing-action@v1
         with:
@@ -66,9 +73,7 @@ jobs:
           endpoint: ${{ secrets.AZURE_ENDPOINT }}
           signing-account-name: ${{ secrets.AZURE_CODE_SIGNING_NAME }}
           certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE_NAME }}
-          # Target 'payload' (renamed from main.dist)
           files-folder: payload
-          # Recursively match all binary extensions
           files-folder-filter: "*.exe,*.dll,*.pyd"
           files-folder-recurse: true
           file-digest: sha256
@@ -82,8 +87,8 @@ jobs:
           $assetsDir = "$payloadDir\Assets"
           New-Item -ItemType Directory -Force -Path $assetsDir
 
-          # A. Generate Required PNGs from your high-res PNG using ImageMagick
-          # We use the new high-quality source file: ahclogo_transp_notxt_square.png
+          # A. Generate Required PNGs from high-res source
+          # Using 'ahclogo_transp_notxt_square.png' for clear, transparent icons
           
           # Square 44x44 Logo
           magick "ahclogo_transp_notxt_square.png" -resize 44x44 "$assetsDir\Square44x44Logo.png"
@@ -98,6 +103,7 @@ jobs:
           Copy-Item "$assetsDir\Square150x150Logo.png" "$assetsDir\SplashScreen.png"
 
           # B. Generate AppxManifest.xml
+          # Note: Using ${{ env.APP_VERSION }} for the Identity Version
           $manifestContent = @"
           <?xml version="1.0" encoding="utf-8"?>
           <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10" 
@@ -105,7 +111,7 @@ jobs:
                    xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities">
             <Identity Name="${{ env.APP_NAME }}" 
                       Publisher="${{ env.PUBLISHER_NAME }}" 
-                      Version="${{ env.VERSION }}" 
+                      Version="${{ env.APP_VERSION }}" 
                       ProcessorArchitecture="x64" />
             <Properties>
               <DisplayName>Syncron-E Waveform Recorder</DisplayName>
@@ -140,14 +146,13 @@ jobs:
       # --- 5. Pack MSIX ---
       - name: Create MSIX Package
         run: |
-          # MakeAppx is available on windows-latest runners (part of Windows SDK)
           $makeappx = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\makeappx.exe"
           if (-not (Test-Path $makeappx)) {
-              # Fallback search if exact version changes
               $makeappx = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\makeappx.exe" | Select-Object -First 1
           }
           
-          & $makeappx pack /d payload /p "Syncron-E.msix" /v
+          # Using dynamic version in filename as well for clarity
+          & $makeappx pack /d payload /p "Syncron-E_${{ env.APP_VERSION }}.msix" /v
 
       # --- 6. Sign the MSIX ---
       - name: Sign MSIX Package
@@ -160,7 +165,8 @@ jobs:
           signing-account-name: ${{ secrets.AZURE_CODE_SIGNING_NAME }}
           certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE_NAME }}
           files-folder: .
-          files-folder-filter: "Syncron-E.msix"
+          # Matches the new filename format
+          files-folder-filter: "Syncron-E_*.msix"
           file-digest: sha256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: sha256
@@ -170,4 +176,4 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Syncron-E-MSIX
-          path: "Syncron-E.msix"
+          path: "Syncron-E_*.msix"
