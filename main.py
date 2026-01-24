@@ -152,7 +152,107 @@ class DatabaseManager:
 
 
 # -----------------------------------------------------------------------------
-# 2. WORKER THREAD
+# 2. MARKER MANAGEMENT (New Feature: Sticky Annotations)
+# -----------------------------------------------------------------------------
+class BreathMarker:
+    """ Represents a single breath annotation (Vertical Line + Text) that moves with the graph. """
+
+    def __init__(self, plot_item, seq_num, y_offset=0):
+        self.plot_item = plot_item
+        self.seq_num = seq_num
+        self.age_samples = 0  # Integer tracking to prevent float drift
+        self.sample_interval = 0.02
+
+        # 1. Vertical Line (Anchor)
+        self.line = pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen('#555', width=1, style=Qt.DashLine))
+
+        # 2. Text Label
+        self.text = pg.TextItem(text=f"#{seq_num}", anchor=(0, 1), color="#ffa500")
+        self.text.setPos(0, y_offset)  # Initial position
+
+        # Add to Scene
+        self.plot_item.addItem(self.line)
+        self.plot_item.addItem(self.text)
+
+    def update_position(self):
+        """ Moves the marker left by one time-step using integer math. """
+        self.age_samples += 1
+        x_pos = -(self.age_samples * self.sample_interval)
+
+        self.line.setPos(x_pos)
+        # We keep Y constant, only updating X
+        self.text.setPos(x_pos, self.text.y())
+        return x_pos
+
+    def set_label(self, new_text, color=None):
+        """ Updates the text (e.g., from external API). """
+        self.text.setText(new_text)
+        if color:
+            self.text.setColor(color)
+
+    def destroy(self):
+        """ Explicit cleanup to prevent memory leaks over 7+ days. """
+        try:
+            self.plot_item.removeItem(self.line)
+            self.plot_item.removeItem(self.text)
+        except Exception as e:
+            print(f"Marker cleanup error: {e}")
+
+
+class BreathMarkerManager:
+    """ Manages lifecycle of BreathMarkers: Creation, Scrolling, Cleanup. """
+
+    def __init__(self, plot_item, name="Manager", log_callback=None):
+        self.plot_item = plot_item
+        self.name = name
+        self.log_callback = log_callback
+        self.markers = {}  # Dict[seq_num, BreathMarker]
+
+    def add_marker(self, seq_num, y_offset=0):
+        if seq_num in self.markers:
+            return  # Prevent duplicates
+
+        try:
+            marker = BreathMarker(self.plot_item, seq_num, y_offset)
+            self.markers[seq_num] = marker
+            # Optional: self.log(f"Spawned marker #{seq_num}")
+        except Exception as e:
+            self.log(f"Failed to spawn marker: {e}")
+
+    def update_all(self):
+        """ Called every time the graph ticks. Moves markers left. """
+        expired_ids = []
+
+        # Move Markers
+        for seq_num, marker in self.markers.items():
+            x_pos = marker.update_position()
+
+            # Boundary check (X < -10.0 seconds)
+            if x_pos < -10.0:
+                expired_ids.append(seq_num)
+
+        # Cleanup Expired
+        for seq_num in expired_ids:
+            self.markers[seq_num].destroy()
+            del self.markers[seq_num]
+
+    def update_annotation(self, seq_num, text, color=None):
+        """ External API Hook """
+        if seq_num in self.markers:
+            self.markers[seq_num].set_label(text, color)
+        else:
+            # Observability: Log if we are trying to annotate a breath that is already gone
+            self.log(f"Missed annotation for #{seq_num} (Expired/Unknown)")
+
+    def log(self, msg):
+        if self.log_callback:
+            self.log_callback(f"[{self.name}] {msg}")
+        else:
+            print(f"[{self.name}] {msg}")
+
+
+# -----------------------------------------------------------------------------
+# 3. WORKER THREAD
 # -----------------------------------------------------------------------------
 class VentilatorWorker(QThread):
     # Signals
@@ -161,8 +261,6 @@ class VentilatorWorker(QThread):
     sig_waveform_data = Signal(float, float)
     sig_breath_seq = Signal(str)
     sig_error = Signal(str)
-
-    # New Signal: Activity Indicator (Payload: "A" or "B")
     sig_rx_activity = Signal(str)
 
     def __init__(self, patient_id):
@@ -214,7 +312,6 @@ class VentilatorWorker(QThread):
         try:
             debug_file = self.base_folder / "startup_debug_log.txt"
             with open(debug_file, "a", encoding='utf-8') as f:
-                # Escaping newlines so one packet equals one line in the debug file
                 clean_data = data.replace('\n', '\\n').replace('\r', '\\r')
                 timestamp = datetime.now().strftime("%H:%M:%S.%f")
                 f.write(f"[{timestamp}] [{source_port}] {clean_data}\n")
@@ -317,14 +414,10 @@ class VentilatorWorker(QThread):
                 # Read Port A
                 if self.port_a.in_waiting > 0:
                     data_a = self.port_a.read(self.port_a.in_waiting).decode('latin-1', errors='ignore')
-
-                    # 1. Fire Activity Signal (Visual Feedback)
                     self.sig_rx_activity.emit("A")
 
                     if not ports_identified:
-                        # 2. Log Debug Data (Observability)
                         self.log_unidentified_data("PORT_A", data_a)
-
                         self.buffer_a += data_a
                         if self.waveform_pattern.search(self.buffer_a):
                             self.assign_ports(self.port_a, self.port_b, self.buffer_a, "A")
@@ -338,14 +431,10 @@ class VentilatorWorker(QThread):
                 # Read Port B
                 if self.port_b.in_waiting > 0:
                     data_b = self.port_b.read(self.port_b.in_waiting).decode('latin-1', errors='ignore')
-
-                    # 1. Fire Activity Signal (Visual Feedback)
                     self.sig_rx_activity.emit("B")
 
                     if not ports_identified:
-                        # 2. Log Debug Data (Observability)
                         self.log_unidentified_data("PORT_B", data_b)
-
                         self.buffer_b += data_b
                         if self.waveform_pattern.search(self.buffer_b):
                             self.assign_ports(self.port_b, self.port_a, self.buffer_b, "B")
@@ -432,7 +521,7 @@ class VentilatorWorker(QThread):
                 if not clean:
                     continue
 
-                # Check for Breath Start (BS) to parse Sequence Number
+                # Check for Breath Start (BS)
                 if clean.startswith("BS"):
                     match = self.waveform_pattern.search(clean)
                     if match:
@@ -500,7 +589,7 @@ class VentilatorWorker(QThread):
 
 
 # -----------------------------------------------------------------------------
-# 3. MAIN WINDOW
+# 4. MAIN WINDOW
 # -----------------------------------------------------------------------------
 class VentilatorApp(QMainWindow):
     def __init__(self):
@@ -535,10 +624,8 @@ class VentilatorApp(QMainWindow):
         self.seq_lbl.setFont(QFont("Segoe UI", 14, QFont.Bold))
         self.seq_lbl.setStyleSheet("color: #ffa500; margin-left: 20px;")
 
-        # --- NEW: RX LEDs Setup ---
+        # RX LEDs
         rx_font = QFont("Segoe UI", 10, QFont.Bold)
-
-        # RX A Label & LED
         lbl_rx_a = QLabel("RX A:")
         lbl_rx_a.setFont(rx_font)
         self.led_a = QLabel()
@@ -549,7 +636,6 @@ class VentilatorApp(QMainWindow):
         self.led_a_timer.timeout.connect(
             lambda: self.led_a.setStyleSheet("background-color: #111; border-radius: 8px; border: 1px solid #555;"))
 
-        # RX B Label & LED
         lbl_rx_b = QLabel("RX B:")
         lbl_rx_b.setFont(rx_font)
         self.led_b = QLabel()
@@ -559,7 +645,6 @@ class VentilatorApp(QMainWindow):
         self.led_b_timer.setSingleShot(True)
         self.led_b_timer.timeout.connect(
             lambda: self.led_b.setStyleSheet("background-color: #111; border-radius: 8px; border: 1px solid #555;"))
-        # ---------------------------
 
         self.mode_lbl = QLabel("Mode: --")
         self.mode_lbl.setFont(QFont("Segoe UI", 16, QFont.Bold))
@@ -568,15 +653,12 @@ class VentilatorApp(QMainWindow):
         h_layout.addWidget(self.status_dot)
         h_layout.addWidget(self.status_lbl)
         h_layout.addWidget(self.seq_lbl)
-
-        # Add RX Indicators to Header
         h_layout.addSpacing(40)
         h_layout.addWidget(lbl_rx_a)
         h_layout.addWidget(self.led_a)
         h_layout.addSpacing(15)
         h_layout.addWidget(lbl_rx_b)
         h_layout.addWidget(self.led_b)
-
         h_layout.addStretch()
         h_layout.addWidget(self.mode_lbl)
         h_layout.addSpacing(20)
@@ -587,7 +669,6 @@ class VentilatorApp(QMainWindow):
         pg.setConfigOptions(antialias=True)
         self.plot_widget = pg.GraphicsLayoutWidget()
 
-        # X-Axis Time Array
         self.data_len = 500
         self.x_axis_data = [x * 0.02 for x in range(-self.data_len, 0)]
 
@@ -598,6 +679,9 @@ class VentilatorApp(QMainWindow):
         self.p_plot.setLabel('bottom', "Time", units='s')
         self.p_curve = self.p_plot.plot(pen=pg.mkPen('#00ff00', width=2))
 
+        # Initialize Marker Manager for Pressure
+        self.p_markers = BreathMarkerManager(self.p_plot, "PressureMarkers", self.log_debug)
+
         self.plot_widget.nextRow()
 
         # Flow Plot
@@ -606,6 +690,9 @@ class VentilatorApp(QMainWindow):
         self.f_plot.showGrid(x=True, y=True, alpha=0.3)
         self.f_plot.setLabel('bottom', "Time", units='s')
         self.f_curve = self.f_plot.plot(pen=pg.mkPen('#ffff00', width=2))
+
+        # Initialize Marker Manager for Flow
+        self.f_markers = BreathMarkerManager(self.f_plot, "FlowMarkers", self.log_debug)
 
         # Data Deques
         self.pressure_data = deque([0] * self.data_len, maxlen=self.data_len)
@@ -642,6 +729,15 @@ class VentilatorApp(QMainWindow):
         except:
             pass
 
+    def log_debug(self, msg):
+        """ Used by Marker Managers to log issues safely. """
+        try:
+            log_path = Path.home() / "Desktop" / "Syncron-E Data" / "error_log.txt"
+            with open(log_path, "a") as f:
+                f.write(f"[DEBUG {datetime.now()}] {msg}\n")
+        except:
+            pass
+
     def check_input(self):
         if self.is_logging: return
         if self.input_id.text().strip():
@@ -658,7 +754,7 @@ class VentilatorApp(QMainWindow):
             self.worker.sig_settings_msg.connect(self.mode_lbl.setText)
             self.worker.sig_breath_seq.connect(self.update_breath_index)
             self.worker.sig_waveform_data.connect(self.update_plot)
-            self.worker.sig_rx_activity.connect(self.on_rx_activity)  # Connect new LED signal
+            self.worker.sig_rx_activity.connect(self.on_rx_activity)
             self.worker.sig_error.connect(lambda m: (self.worker.stop(), QMessageBox.critical(self, "Error", m)))
             self.worker.start()
 
@@ -681,12 +777,13 @@ class VentilatorApp(QMainWindow):
     @Slot(str)
     def update_breath_index(self, seq_num):
         self.seq_lbl.setText(f"Breath Index: {seq_num}")
+        # Add new markers at x=0
+        self.p_markers.add_marker(seq_num, y_offset=0)
+        self.f_markers.add_marker(seq_num, y_offset=0)
 
     @Slot(str)
     def on_rx_activity(self, port_id):
-        """Flashes the corresponding LED green for 50ms on data receipt."""
         style_on = "background-color: #00ff00; border-radius: 8px; border: 1px solid #555;"
-
         if port_id == "A":
             self.led_a.setStyleSheet(style_on)
             self.led_a_timer.start(50)
@@ -700,6 +797,10 @@ class VentilatorApp(QMainWindow):
         self.flow_data.append(f)
         self.p_curve.setData(self.x_axis_data, list(self.pressure_data))
         self.f_curve.setData(self.x_axis_data, list(self.flow_data))
+
+        # Scroll markers based on strict integer age tracking
+        self.p_markers.update_all()
+        self.f_markers.update_all()
 
 
 if __name__ == "__main__":
