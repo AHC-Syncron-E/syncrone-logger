@@ -47,7 +47,7 @@ jobs:
             --windows-console-mode=disable `
             --output-dir=build `
             --company-name="Autonomous Healthcare Inc." `
-            --product-name="Syncron-E" `
+            --product-name="Syncron-E Waveform Recorder" `
             --file-version="${{ env.VERSION }}" `
             --product-version="${{ env.VERSION }}" `
             main.py
@@ -57,7 +57,6 @@ jobs:
 
       # --- 3. Sign the Inner Executable ---
       # Essential for WDAC compliance inside the container
-      # --- REPLACED: Recursive Signing for Maximum Compatibility ---
       - name: Sign EVERYTHING (DLLs, PYDs, EXEs)
         uses: azure/artifact-signing-action@v1
         with:
@@ -71,7 +70,6 @@ jobs:
           files-folder: payload
           # Recursively match all binary extensions
           files-folder-filter: "*.exe,*.dll,*.pyd"
-          # CRITICAL FIX: Enable recursion here too
           files-folder-recurse: true
           file-digest: sha256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
@@ -84,18 +82,17 @@ jobs:
           $assetsDir = "$payloadDir\Assets"
           New-Item -ItemType Directory -Force -Path $assetsDir
 
-          # A. Generate Required PNGs from your icon.ico using ImageMagick
-          # FIX: We use 'icon.ico[0]' to select the first layer so it doesn't 
-          # generate multiple files like logo-0.png, logo-1.png.
+          # A. Generate Required PNGs from your high-res PNG using ImageMagick
+          # We use the new high-quality source file: ahclogo_transp_notxt_square.png
           
           # Square 44x44 Logo
-          magick "icon.ico[0]" -resize 44x44 "$assetsDir\Square44x44Logo.png"
+          magick "ahclogo_transp_notxt_square.png" -resize 44x44 "$assetsDir\Square44x44Logo.png"
           
           # Square 150x150 Logo
-          magick "icon.ico[0]" -resize 150x150 "$assetsDir\Square150x150Logo.png"
+          magick "ahclogo_transp_notxt_square.png" -resize 150x150 "$assetsDir\Square150x150Logo.png"
           
           # Store Logo (50x50)
-          magick "icon.ico[0]" -resize 50x50 "$assetsDir\StoreLogo.png"
+          magick "ahclogo_transp_notxt_square.png" -resize 50x50 "$assetsDir\StoreLogo.png"
           
           # Splash Screen (Reusing 150x150)
           Copy-Item "$assetsDir\Square150x150Logo.png" "$assetsDir\SplashScreen.png"
@@ -111,7 +108,7 @@ jobs:
                       Version="${{ env.VERSION }}" 
                       ProcessorArchitecture="x64" />
             <Properties>
-              <DisplayName>Syncron-E CD Logger</DisplayName>
+              <DisplayName>Syncron-E Waveform Recorder</DisplayName>
               <PublisherDisplayName>Autonomous Healthcare Inc.</PublisherDisplayName>
               <Logo>Assets\StoreLogo.png</Logo>
             </Properties>
@@ -127,8 +124,8 @@ jobs:
             <Applications>
               <Application Id="SyncronEApp" Executable="main.exe" EntryPoint="Windows.FullTrustApplication">
                 <uap:VisualElements 
-                  DisplayName="Syncron-E CD Logger" 
-                  Description="Syncron-E CD Logger Application" 
+                  DisplayName="Syncron-E Waveform Recorder" 
+                  Description="Syncron-E Waveform Recorder Application" 
                   BackgroundColor="transparent" 
                   Square150x150Logo="Assets\Square150x150Logo.png" 
                   Square44x44Logo="Assets\Square44x44Logo.png">

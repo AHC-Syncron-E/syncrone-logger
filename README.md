@@ -6,7 +6,7 @@
 ![Platform](https://img.shields.io/badge/platform-Windows_x64-blue)
 
 ## 🚀 Quick Start (For Users)
-1. Download `Syncron-E CD Logger.exe` from the **Releases** tab.
+1. Download `Syncron-E Waveform Recorder.exe` from the **Releases** tab.
 2. Double-click to run.
    * *Note:* No Administrator privileges are required.
    * *Note:* The app extracts momentarily (displaying a progress bar) before launching.
@@ -77,7 +77,7 @@ Wraps the `main.dist` folder into a single `.exe` using 7-Zip SFX and fixes UAC 
 ```
 
 * **Requires:** `7zSD.sfx`, `ResourceHacker.exe`, `icon.ico`.
-* **Output:** `Syncron-E CD Logger.exe`
+* **Output:** `Syncron-E Waveform Recorder.exe`
 
 ### 3. Sign (Azure)
 

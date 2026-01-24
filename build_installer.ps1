@@ -9,7 +9,7 @@ $ResHacker = ".\ResourceHacker.exe"
 $SfxModule = ".\7zSD.sfx"
 $IconFile = ".\icon.ico"
 # CHANGED: Now using spaces
-$OutputExe = "Syncron-E CD Logger.exe"
+$OutputExe = "Syncron-E Waveform Recorder.exe"
 $TempSfx = "loader_branded.sfx"
 $ManifestFile = "uac.manifest"
 
@@ -61,7 +61,7 @@ Write-Host "3. Creating SFX Config..." -ForegroundColor Yellow
 # This folder is usually writable by standard users and permitted by AppLocker.
 $configContent = @"
 ;!@Install@!UTF-8!
-Title="Syncron-E CD Logger"
+Title="Syncron-E Waveform Recorder"
 Progress="yes"
 InstallPath="%LOCALAPPDATA%\\Syncron-E_Logger"
 RunProgram="main.exe"

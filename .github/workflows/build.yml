@@ -85,7 +85,7 @@ jobs:
           signing-account-name: ${{ secrets.AZURE_CODE_SIGNING_NAME }}
           certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE_NAME }}
           files-folder: .
-          files-folder-filter: "Syncron-E CD Logger.exe"
+          files-folder-filter: "Syncron-E Waveform Recorder.exe"
           file-digest: sha256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: sha256
@@ -97,7 +97,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: Syncron-E-Installer
-          path: "Syncron-E CD Logger.exe"
+          path: "Syncron-E Waveform Recorder.exe"
 
       # Upload Plan B: The Portable Zip
       - name: Upload Portable Version
