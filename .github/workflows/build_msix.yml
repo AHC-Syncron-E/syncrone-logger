@@ -64,6 +64,7 @@ jobs:
             --product-name="Syncron-E Waveform Recorder" `
             --file-version="${{ env.APP_VERSION }}" `
             --product-version="${{ env.APP_VERSION }}" `
+            --include-data-file=ahc_logo.svg=ahc_logo.svg `
             main.py
 
           # Rename the dist folder to something clean for packaging
