@@ -221,6 +221,10 @@ class VentilatorWorker(QThread):
     sig_error = Signal(str)
     sig_rx_activity = Signal(str)
 
+    # NEW Signals for Self-Healing
+    sig_connection_lost = Signal()
+    sig_connection_restored = Signal()
+
     def __init__(self, patient_id):
         super().__init__()
         self.patient_id = patient_id
@@ -243,14 +247,17 @@ class VentilatorWorker(QThread):
         self.SUPPORTED_DEVICES = [(0x0403, 0x6001), (0x067B, 0x23A3), (0x067B, 0x2303)]
         self.waveform_pattern = re.compile(r"BS,\s*S:(\d+),")
 
+        # Self Healing Config
+        self.reconnect_timeout_seconds = 120  # 2 Minutes
+
     def open_log_files(self):
         self.base_folder.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.current_file_date = datetime.now().date()
         wf_name = f"waveforms_{timestamp}.txt"
         st_name = f"settings_{timestamp}.txt"
-        self.file_waveform = open(self.base_folder / wf_name, 'w', encoding='utf-8', buffering=1)
-        self.file_settings = open(self.base_folder / st_name, 'w', encoding='utf-8', buffering=1)
+        self.file_waveform = open(self.base_folder / wf_name, 'a', encoding='utf-8', buffering=1)
+        self.file_settings = open(self.base_folder / st_name, 'a', encoding='utf-8', buffering=1)
 
     def log_unidentified_data(self, source_port, data):
         try:
@@ -292,9 +299,7 @@ class VentilatorWorker(QThread):
     def close_system(self):
         if self.port_a and self.port_a.is_open: self.port_a.close()
         if self.port_b and self.port_b.is_open: self.port_b.close()
-        if self.db_manager: self.db_manager.close()
-        if self.file_waveform: self.file_waveform.close()
-        if self.file_settings: self.file_settings.close()
+        # Note: We do NOT close DB or Files during temporary disconnects, only on final stop
 
     def configure_port(self, port_obj, baud_rate):
         port_obj.baudrate = baud_rate
@@ -314,6 +319,53 @@ class VentilatorWorker(QThread):
                     break
         return sorted(list(set(valid_devices)))
 
+    def perform_reconnect_procedure(self):
+        """ Blocking loop (inside thread) that tries to restore connection """
+        self.sig_connection_lost.emit()
+        self.sig_status_update.emit("CONNECTION LOST - RECONNECTING...", "#ffa500")
+
+        # Close handles carefully
+        try:
+            if self.port_a: self.port_a.close()
+            if self.port_b: self.port_b.close()
+        except:
+            pass
+
+        self.port_a = None
+        self.port_b = None
+
+        start_wait = time.monotonic()
+
+        while self.is_running:
+            elapsed = time.monotonic() - start_wait
+            remaining = self.reconnect_timeout_seconds - elapsed
+
+            if remaining <= 0:
+                return False  # Failed
+
+            self.sig_status_update.emit(f"RECONNECTING... ({int(remaining)}s)", "#ffa500")
+
+            # Scan
+            found = self.get_valid_ports()
+            if len(found) == 2:
+                try:
+                    dev_a, dev_b = found[0], found[1]
+                    self.port_a = serial.Serial(dev_a, timeout=0)
+                    self.configure_port(self.port_a, 38400)
+                    self.port_b = serial.Serial(dev_b, timeout=0)
+                    self.configure_port(self.port_b, 38400)
+
+                    # We have ports, we need to re-identify (A vs B)
+                    # We assume minimal logic here: just get back to reading loop.
+                    # The main loop logic will re-trigger identification if we reset flags.
+                    return True
+                except Exception as e:
+                    pass  # Keep trying
+
+            time.sleep(1.0)
+
+        return False
+
     def run(self):
         self.is_running = True
         try:
@@ -325,10 +377,15 @@ class VentilatorWorker(QThread):
 
             dev_a, dev_b = found_devices[0], found_devices[1]
             self.setup_system()
-            self.port_a = serial.Serial(dev_a, timeout=0)
-            self.configure_port(self.port_a, 38400)
-            self.port_b = serial.Serial(dev_b, timeout=0)
-            self.configure_port(self.port_b, 38400)
+
+            try:
+                self.port_a = serial.Serial(dev_a, timeout=0)
+                self.configure_port(self.port_a, 38400)
+                self.port_b = serial.Serial(dev_b, timeout=0)
+                self.configure_port(self.port_b, 38400)
+            except Exception as e:
+                self.sig_error.emit(f"Initial Connection Failed: {e}")
+                return
 
             self.sig_status_update.emit("IDENTIFYING PORTS...", "#00aaff")
 
@@ -339,65 +396,93 @@ class VentilatorWorker(QThread):
             next_wake = time.monotonic() + loop_interval
             ports_identified = False
 
+            # We assume initial ports need ID
+            # If we reconnect, we might need to re-ID or we might preserve assignment?
+            # Safest is to re-ID if we lost them entirely.
+
             while self.is_running:
-                now = time.monotonic()
-                self.check_file_rotation()
+                try:
+                    now = time.monotonic()
+                    self.check_file_rotation()
 
-                if self.port_a.in_waiting > 0:
-                    data_a = self.port_a.read(self.port_a.in_waiting).decode('latin-1', errors='ignore')
-                    self.sig_rx_activity.emit("A")
-                    if not ports_identified:
-                        self.log_unidentified_data("PORT_A", data_a)
-                        self.buffer_a += data_a
-                        if self.waveform_pattern.search(self.buffer_a):
-                            self.assign_ports(self.port_a, self.port_b, self.buffer_a, "A")
-                            ports_identified = True
-                    else:
-                        if self.port_a == self.waveform_port:
-                            self.handle_waveform(data_a)
+                    # READ PORT A
+                    if self.port_a and self.port_a.in_waiting > 0:
+                        data_a = self.port_a.read(self.port_a.in_waiting).decode('latin-1', errors='ignore')
+                        self.sig_rx_activity.emit("A")
+                        if not ports_identified:
+                            self.log_unidentified_data("PORT_A", data_a)
+                            self.buffer_a += data_a
+                            if self.waveform_pattern.search(self.buffer_a):
+                                self.assign_ports(self.port_a, self.port_b, self.buffer_a, "A")
+                                ports_identified = True
                         else:
-                            self.handle_settings(data_a)
+                            if self.port_a == self.waveform_port:
+                                self.handle_waveform(data_a)
+                            else:
+                                self.handle_settings(data_a)
 
-                if self.port_b.in_waiting > 0:
-                    data_b = self.port_b.read(self.port_b.in_waiting).decode('latin-1', errors='ignore')
-                    self.sig_rx_activity.emit("B")
-                    if not ports_identified:
-                        self.log_unidentified_data("PORT_B", data_b)
-                        self.buffer_b += data_b
-                        if self.waveform_pattern.search(self.buffer_b):
-                            self.assign_ports(self.port_b, self.port_a, self.buffer_b, "B")
-                            ports_identified = True
-                    else:
-                        if self.port_b == self.waveform_port:
-                            self.handle_waveform(data_b)
+                    # READ PORT B
+                    if self.port_b and self.port_b.in_waiting > 0:
+                        data_b = self.port_b.read(self.port_b.in_waiting).decode('latin-1', errors='ignore')
+                        self.sig_rx_activity.emit("B")
+                        if not ports_identified:
+                            self.log_unidentified_data("PORT_B", data_b)
+                            self.buffer_b += data_b
+                            if self.waveform_pattern.search(self.buffer_b):
+                                self.assign_ports(self.port_b, self.port_a, self.buffer_b, "B")
+                                ports_identified = True
                         else:
-                            self.handle_settings(data_b)
+                            if self.port_b == self.waveform_port:
+                                self.handle_waveform(data_b)
+                            else:
+                                self.handle_settings(data_b)
 
-                if now - last_db_commit >= 1.0:
-                    self.db_manager.commit_batch()
-                    last_db_commit = now
+                    # Periodic Tasks
+                    if now - last_db_commit >= 1.0:
+                        self.db_manager.commit_batch()
+                        last_db_commit = now
 
-                if ports_identified and (now - last_serial_write >= 5.0):
-                    msg = "SNDF\r"
-                    try:
-                        self.settings_port.write(msg.encode('ascii'))
-                        self.settings_port.flush()
-                        last_serial_write = now
-                    except:
-                        pass
+                    if ports_identified and (now - last_serial_write >= 5.0):
+                        msg = "SNDF\r"
+                        try:
+                            self.settings_port.write(msg.encode('ascii'))
+                            self.settings_port.flush()
+                            last_serial_write = now
+                        except:
+                            pass
 
-                sleep_duration = next_wake - time.monotonic()
-                if sleep_duration > 0:
-                    time.sleep(sleep_duration)
-                else:
-                    next_wake = time.monotonic()
-                next_wake += loop_interval
+                    # Sleep
+                    sleep_duration = next_wake - time.monotonic()
+                    if sleep_duration > 0:
+                        time.sleep(sleep_duration)
+                    else:
+                        next_wake = time.monotonic()
+                    next_wake += loop_interval
+
+                except (serial.SerialException, OSError) as e:
+                    # !!! SELF HEALING TRIGGER !!!
+                    success = self.perform_reconnect_procedure()
+                    if success:
+                        self.sig_connection_restored.emit()
+                        # Reset ID flags because ports might have swapped
+                        ports_identified = False
+                        self.buffer_a = ""
+                        self.buffer_b = ""
+                        # Re-loop immediately
+                        continue
+                    else:
+                        # Timeout Reached
+                        self.sig_error.emit("Connection Lost. Reconnect Failed.")
+                        break
 
         except Exception as e:
             self.log_crash(e)
             self.sig_error.emit(f"Runtime Error: {e}")
         finally:
             self.close_system()
+            if self.db_manager: self.db_manager.close()
+            if self.file_waveform: self.file_waveform.close()
+            if self.file_settings: self.file_settings.close()
 
     def assign_ports(self, wave_port, set_port, init_buffer, name):
         self.waveform_port = wave_port
@@ -499,8 +584,13 @@ class VentilatorApp(QMainWindow):
         self.is_logging = False
         self.is_locked = False
         self.has_data_started = False
+        self.is_reconnecting = False
 
-        self.session_start_time = None
+        # TIMING / DURATION LOGIC (Accumulator)
+        self.session_start_time = None  # Wall clock time when we first started
+        self.segment_start_time = None  # Wall clock time when current connection started
+        self.accumulated_duration = 0.0  # Seconds stored from previous segments
+
         self.session_breath_count = 0
         self.start_disk_space = 0
 
@@ -689,15 +779,12 @@ class VentilatorApp(QMainWindow):
         self.logo_lbl.setCursor(Qt.PointingHandCursor)
         self.logo_lbl.clicked.connect(self.show_about_dialog)
 
-        # Determine the directory where the script or executable is located
+        # --- PATH FIX START ---
         if getattr(sys, 'frozen', False):
-            # If compiled with Nuitka/PyInstaller, use the executable's directory
             base_path = Path(sys.executable).parent
         else:
-            # If running as a script, use the script's directory
             base_path = Path(__file__).parent
 
-        # Check for files relative to that base path
         logo_path = None
         svg_file = base_path / "ahc_logo.svg"
         png_file = base_path / "ahclogo.png"
@@ -706,6 +793,7 @@ class VentilatorApp(QMainWindow):
             logo_path = str(svg_file)
         elif png_file.exists():
             logo_path = str(png_file)
+        # --- PATH FIX END ---
 
         if logo_path:
             pix = QPixmap(logo_path)
@@ -800,7 +888,6 @@ class VentilatorApp(QMainWindow):
         dash_font_lbl = QFont("Segoe UI", 10)
         dash_font_val = QFont("Segoe UI", 22, QFont.Bold)
 
-        # UPDATED: Added color parameter and alignment fixes
         def make_dash_item(label, initial_val, tooltip, color="#ffffff"):
             w = QWidget()
             w.setToolTip(tooltip)
@@ -810,13 +897,11 @@ class VentilatorApp(QMainWindow):
             l = QLabel(label)
             l.setFont(dash_font_lbl)
             l.setStyleSheet("color: #aaa;")
-            # UPDATED: Force labels to have same height to align across widgets
             l.setFixedHeight(25)
             l.setAlignment(Qt.AlignBottom | Qt.AlignHCenter)
 
             v = QLabel(initial_val)
             v.setFont(dash_font_val)
-            # UPDATED: Apply color and center alignment
             v.setStyleSheet(f"color: {color};")
             v.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
 
@@ -826,15 +911,15 @@ class VentilatorApp(QMainWindow):
 
         w_started, self.lbl_started = make_dash_item("STARTED:", "--",
                                                      "The exact date and time the first waveform data packet was received.",
-                                                     "#ffffff")  # White
+                                                     "#ffffff")
 
         w_duration, self.lbl_duration = make_dash_item("DURATION:", "00:00:00",
                                                        "The total time elapsed since valid waveform data began recording.",
-                                                       "#00e5ff")  # Cyan (Timer)
+                                                       "#00e5ff")
 
         w_breaths, self.lbl_breaths = make_dash_item("BREATHS RECORDED:", "0",
                                                      "The total number of complete breaths captured during this recording session.",
-                                                     "#ffa500")  # Orange (Breath Markers)
+                                                     "#ffa500")
 
         # Calculate initial disk space immediately
         initial_bytes = self.check_disk_space()
@@ -842,7 +927,7 @@ class VentilatorApp(QMainWindow):
         days = (initial_bytes / 5120) / 86400
         w_disk, self.lbl_disk = make_dash_item("DISK SPACE:", f"~{days:.1f} Days Free\n({gb:.0f} GB)",
                                                "Estimates how many days of recording are supported by your current free disk space.",
-                                               "#ccff99")  # Pastel Green (Safe)
+                                               "#ccff99")
 
         r2_layout.addWidget(w_started)
         r2_layout.addWidget(w_duration)
@@ -938,6 +1023,11 @@ class VentilatorApp(QMainWindow):
             self.session_breath_count = 0
             self.start_disk_space = free_bytes
 
+            # Reset Accumulator logic
+            self.accumulated_duration = 0.0
+            self.session_start_time = None
+            self.segment_start_time = None
+
             self.lbl_started.setText("WAITING FOR DATA...")
             self.lbl_duration.setText("WAITING...")
             self.lbl_breaths.setText("0")
@@ -954,6 +1044,11 @@ class VentilatorApp(QMainWindow):
             self.worker.sig_waveform_data.connect(self.update_plot)
             self.worker.sig_rx_activity.connect(self.on_rx_activity)
             self.worker.sig_error.connect(self.handle_worker_error)
+
+            # Connect Self-Healing Signals
+            self.worker.sig_connection_lost.connect(self.on_connection_lost)
+            self.worker.sig_connection_restored.connect(self.on_connection_restored)
+
             self.worker.start()
 
             self.last_pkt_time = time.monotonic()
@@ -987,6 +1082,30 @@ class VentilatorApp(QMainWindow):
             self.check_input()
         else:
             self.btn_action.setStyleSheet("background-color: #333; color: #666;")
+
+    # --- SELF HEALING HANDLERS ---
+    @Slot()
+    def on_connection_lost(self):
+        """ Pauses duration timer and updates state """
+        if self.is_reconnecting: return
+        self.is_reconnecting = True
+
+        # Calculate valid duration up to this moment and save it
+        if self.segment_start_time:
+            now = datetime.now()
+            delta = (now - self.segment_start_time).total_seconds()
+            self.accumulated_duration += delta
+
+        self.segment_start_time = None  # Stop the current segment
+        self.update_status("RECONNECTING...", "#ffa500")
+
+    @Slot()
+    def on_connection_restored(self):
+        """ Resumes duration timer """
+        if not self.is_reconnecting: return
+        self.is_reconnecting = False
+        self.segment_start_time = datetime.now()
+        self.update_status("RECORDING (Recovered)", "#00ff00")
 
     @Slot(str)
     def update_mode_display(self, text):
@@ -1036,13 +1155,15 @@ class VentilatorApp(QMainWindow):
         if not self.has_data_started:
             self.has_data_started = True
             self.session_start_time = datetime.now()
+            self.segment_start_time = self.session_start_time  # Init segment
             self.lbl_started.setText(self.session_start_time.strftime("%b %d @ %I:%M %p"))
             self.ui_timer.start()
             self.update_status("RECORDING", "#00ff00")
 
         if self.is_in_silence:
             self.is_in_silence = False
-            self.update_status("RECORDING", "#00ff00")
+            if not self.is_reconnecting:
+                self.update_status("RECORDING", "#00ff00")
 
         self.pressure_data.append(p)
         self.flow_data.append(f)
@@ -1053,6 +1174,18 @@ class VentilatorApp(QMainWindow):
 
     def check_watchdog(self):
         if not self.is_logging: return
+        # If we are in reconnection mode, we don't need the watchdog to scream "Signal Lost"
+        # because the Status Bar already says "Reconnecting..."
+        if self.is_reconnecting:
+            # Still append NaNs to keep graph moving or flat lining to show gap
+            self.pressure_data.append(float('nan'))
+            self.flow_data.append(float('nan'))
+            self.p_curve.setData(self.x_axis_data, list(self.pressure_data))
+            self.f_curve.setData(self.x_axis_data, list(self.flow_data))
+            self.p_markers.update_all()
+            self.f_markers.update_all()
+            return
+
         if time.monotonic() - self.last_pkt_time > 0.1:
             if not self.is_in_silence:
                 self.is_in_silence = True
@@ -1066,13 +1199,20 @@ class VentilatorApp(QMainWindow):
 
     def update_ui_dashboard(self):
         if not self.is_logging or not self.has_data_started: return
-        now = datetime.now()
-        elapsed = now - self.session_start_time
-        self.lbl_duration.setText(str(elapsed).split('.')[0])
+
+        # Calculate Total Duration (Accumulated + Current Segment)
+        total_sec = self.accumulated_duration
+        if self.segment_start_time and not self.is_reconnecting:
+            total_sec += (datetime.now() - self.segment_start_time).total_seconds()
+
+        # Format HH:MM:SS
+        m, s = divmod(int(total_sec), 60)
+        h, m = divmod(m, 60)
+        self.lbl_duration.setText(f"{h:02d}:{m:02d}:{s:02d}")
 
         opt = self.combo_stop.currentData()
         if opt["type"] == "time":
-            if elapsed.total_seconds() >= opt["value"]:
+            if total_sec >= opt["value"]:
                 self.stop_logging_procedure(f"Time Limit ({opt['label']})")
                 return
 
