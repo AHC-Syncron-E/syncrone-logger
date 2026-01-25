@@ -688,11 +688,24 @@ class VentilatorApp(QMainWindow):
         self.logo_lbl = ClickableLabel()
         self.logo_lbl.setCursor(Qt.PointingHandCursor)
         self.logo_lbl.clicked.connect(self.show_about_dialog)
+
+        # Determine the directory where the script or executable is located
+        if getattr(sys, 'frozen', False):
+            # If compiled with Nuitka/PyInstaller, use the executable's directory
+            base_path = Path(sys.executable).parent
+        else:
+            # If running as a script, use the script's directory
+            base_path = Path(__file__).parent
+
+        # Check for files relative to that base path
         logo_path = None
-        if Path("ahc_logo.svg").exists():
-            logo_path = "ahc_logo.svg"
-        elif Path("ahclogo.png").exists():
-            logo_path = "ahclogo.png"
+        svg_file = base_path / "ahc_logo.svg"
+        png_file = base_path / "ahclogo.png"
+
+        if svg_file.exists():
+            logo_path = str(svg_file)
+        elif png_file.exists():
+            logo_path = str(png_file)
 
         if logo_path:
             pix = QPixmap(logo_path)
