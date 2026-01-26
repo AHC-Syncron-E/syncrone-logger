@@ -19,7 +19,8 @@ import serial.tools.list_ports
 # GUI Components
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QHBoxLayout, QPushButton, QLabel, QFrame, QMessageBox,
-                               QLineEdit, QComboBox, QSizePolicy, QDialog, QDialogButtonBox)
+                               QLineEdit, QComboBox, QSizePolicy, QDialog, QDialogButtonBox,
+                               QGridLayout)  # Added QGridLayout
 from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer, QEvent
 from PySide6.QtGui import QFont, QIcon, QColor, QCloseEvent, QPixmap, QMouseEvent
 
@@ -118,6 +119,7 @@ class DatabaseManager:
                           )
                           """)
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_wf_sess ON waveforms (session_id);")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_wf_time ON waveforms (timestamp);")
         self.conn.execute("""
                           CREATE TABLE IF NOT EXISTS settings
                           (
@@ -135,6 +137,7 @@ class DatabaseManager:
                           )
                           """)
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_st_sess ON settings (session_id);")
+        self.conn.execute("CREATE INDEX IF NOT EXISTS idx_st_time ON settings (timestamp);")
         self.conn.commit()
 
     def insert_waveform(self, session_id, raw_data, pressure=None, flow=None):
@@ -211,7 +214,66 @@ class BreathMarkerManager:
 
 
 # -----------------------------------------------------------------------------
-# 3. WORKER THREAD
+# 3. SNAPSHOT WORKER
+# -----------------------------------------------------------------------------
+class SnapshotWorker(QThread):
+    def __init__(self, db_path, output_folder):
+        super().__init__()
+        self.db_path = str(db_path)
+        self.output_folder = output_folder
+        self.is_running = True
+
+    def run(self):
+        time.sleep(10)
+        while self.is_running:
+            for _ in range(300):
+                if not self.is_running: return
+                time.sleep(1)
+
+            if not self.is_running: return
+
+            try:
+                self.generate_files()
+            except Exception:
+                pass
+
+    def generate_files(self):
+        cutoff = (datetime.now() - timedelta(hours=1)).isoformat()
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+
+        # Waveforms
+        cursor.execute("SELECT raw_data FROM waveforms WHERE timestamp > ? ORDER BY id ASC", (cutoff,))
+        rows = cursor.fetchall()
+        if rows:
+            temp_name = self.output_folder / "~temp_last_1hr_wave.tmp"
+            final_name = self.output_folder / "LAST_1HOUR_WAVEFORMS.txt"
+            with open(temp_name, 'w', encoding='utf-8') as f:
+                for row in rows: f.write(row[0])
+            try:
+                if final_name.exists(): os.remove(final_name)
+                os.rename(temp_name, final_name)
+            except OSError:
+                if temp_name.exists(): os.remove(temp_name)
+
+        # Settings
+        cursor.execute("SELECT raw_data FROM settings WHERE timestamp > ? ORDER BY id ASC", (cutoff,))
+        rows = cursor.fetchall()
+        if rows:
+            temp_name = self.output_folder / "~temp_last_1hr_settings.tmp"
+            final_name = self.output_folder / "LAST_1HOUR_SETTINGS.txt"
+            with open(temp_name, 'w', encoding='utf-8') as f:
+                for row in rows: f.write(row[0])
+            try:
+                if final_name.exists(): os.remove(final_name)
+                os.rename(temp_name, final_name)
+            except OSError:
+                if temp_name.exists(): os.remove(temp_name)
+        conn.close()
+
+
+# -----------------------------------------------------------------------------
+# 4. VENTILATOR WORKER
 # -----------------------------------------------------------------------------
 class VentilatorWorker(QThread):
     sig_status_update = Signal(str, str)
@@ -220,8 +282,6 @@ class VentilatorWorker(QThread):
     sig_breath_seq = Signal(str)
     sig_error = Signal(str)
     sig_rx_activity = Signal(str)
-
-    # NEW Signals for Self-Healing
     sig_connection_lost = Signal()
     sig_connection_restored = Signal()
 
@@ -246,9 +306,7 @@ class VentilatorWorker(QThread):
         self.current_file_date = None
         self.SUPPORTED_DEVICES = [(0x0403, 0x6001), (0x067B, 0x23A3), (0x067B, 0x2303)]
         self.waveform_pattern = re.compile(r"BS,\s*S:(\d+),")
-
-        # Self Healing Config
-        self.reconnect_timeout_seconds = 120  # 2 Minutes
+        self.reconnect_timeout_seconds = 120
 
     def open_log_files(self):
         self.base_folder.mkdir(parents=True, exist_ok=True)
@@ -299,7 +357,6 @@ class VentilatorWorker(QThread):
     def close_system(self):
         if self.port_a and self.port_a.is_open: self.port_a.close()
         if self.port_b and self.port_b.is_open: self.port_b.close()
-        # Note: We do NOT close DB or Files during temporary disconnects, only on final stop
 
     def configure_port(self, port_obj, baud_rate):
         port_obj.baudrate = baud_rate
@@ -320,32 +377,22 @@ class VentilatorWorker(QThread):
         return sorted(list(set(valid_devices)))
 
     def perform_reconnect_procedure(self):
-        """ Blocking loop (inside thread) that tries to restore connection """
         self.sig_connection_lost.emit()
         self.sig_status_update.emit("CONNECTION LOST - RECONNECTING...", "#ffa500")
-
-        # Close handles carefully
         try:
             if self.port_a: self.port_a.close()
             if self.port_b: self.port_b.close()
         except:
             pass
-
         self.port_a = None
         self.port_b = None
-
         start_wait = time.monotonic()
 
         while self.is_running:
             elapsed = time.monotonic() - start_wait
             remaining = self.reconnect_timeout_seconds - elapsed
-
-            if remaining <= 0:
-                return False  # Failed
-
+            if remaining <= 0: return False
             self.sig_status_update.emit(f"RECONNECTING... ({int(remaining)}s)", "#ffa500")
-
-            # Scan
             found = self.get_valid_ports()
             if len(found) == 2:
                 try:
@@ -354,16 +401,10 @@ class VentilatorWorker(QThread):
                     self.configure_port(self.port_a, 38400)
                     self.port_b = serial.Serial(dev_b, timeout=0)
                     self.configure_port(self.port_b, 38400)
-
-                    # We have ports, we need to re-identify (A vs B)
-                    # We assume minimal logic here: just get back to reading loop.
-                    # The main loop logic will re-trigger identification if we reset flags.
                     return True
                 except Exception as e:
-                    pass  # Keep trying
-
+                    pass
             time.sleep(1.0)
-
         return False
 
     def run(self):
@@ -396,16 +437,11 @@ class VentilatorWorker(QThread):
             next_wake = time.monotonic() + loop_interval
             ports_identified = False
 
-            # We assume initial ports need ID
-            # If we reconnect, we might need to re-ID or we might preserve assignment?
-            # Safest is to re-ID if we lost them entirely.
-
             while self.is_running:
                 try:
                     now = time.monotonic()
                     self.check_file_rotation()
 
-                    # READ PORT A
                     if self.port_a and self.port_a.in_waiting > 0:
                         data_a = self.port_a.read(self.port_a.in_waiting).decode('latin-1', errors='ignore')
                         self.sig_rx_activity.emit("A")
@@ -421,7 +457,6 @@ class VentilatorWorker(QThread):
                             else:
                                 self.handle_settings(data_a)
 
-                    # READ PORT B
                     if self.port_b and self.port_b.in_waiting > 0:
                         data_b = self.port_b.read(self.port_b.in_waiting).decode('latin-1', errors='ignore')
                         self.sig_rx_activity.emit("B")
@@ -437,7 +472,6 @@ class VentilatorWorker(QThread):
                             else:
                                 self.handle_settings(data_b)
 
-                    # Periodic Tasks
                     if now - last_db_commit >= 1.0:
                         self.db_manager.commit_batch()
                         last_db_commit = now
@@ -451,7 +485,6 @@ class VentilatorWorker(QThread):
                         except:
                             pass
 
-                    # Sleep
                     sleep_duration = next_wake - time.monotonic()
                     if sleep_duration > 0:
                         time.sleep(sleep_duration)
@@ -460,18 +493,14 @@ class VentilatorWorker(QThread):
                     next_wake += loop_interval
 
                 except (serial.SerialException, OSError) as e:
-                    # !!! SELF HEALING TRIGGER !!!
                     success = self.perform_reconnect_procedure()
                     if success:
                         self.sig_connection_restored.emit()
-                        # Reset ID flags because ports might have swapped
                         ports_identified = False
                         self.buffer_a = ""
                         self.buffer_b = ""
-                        # Re-loop immediately
                         continue
                     else:
-                        # Timeout Reached
                         self.sig_error.emit("Connection Lost. Reconnect Failed.")
                         break
 
@@ -572,7 +601,7 @@ class VentilatorWorker(QThread):
 
 
 # -----------------------------------------------------------------------------
-# 4. MAIN WINDOW
+# 5. MAIN WINDOW
 # -----------------------------------------------------------------------------
 class VentilatorApp(QMainWindow):
     def __init__(self):
@@ -586,10 +615,10 @@ class VentilatorApp(QMainWindow):
         self.has_data_started = False
         self.is_reconnecting = False
 
-        # TIMING / DURATION LOGIC (Accumulator)
-        self.session_start_time = None  # Wall clock time when we first started
-        self.segment_start_time = None  # Wall clock time when current connection started
-        self.accumulated_duration = 0.0  # Seconds stored from previous segments
+        # TIMING / DURATION LOGIC
+        self.session_start_time = None
+        self.segment_start_time = None
+        self.accumulated_duration = 0.0
 
         self.session_breath_count = 0
         self.start_disk_space = 0
@@ -600,6 +629,10 @@ class VentilatorApp(QMainWindow):
 
         self.config_corrupt_msg = None
         self.auto_stop_options = self.load_config()
+
+        # Threads
+        self.worker = None
+        self.snapshot_worker = None
 
         # Watchdog
         self.last_pkt_time = 0
@@ -715,14 +748,19 @@ class VentilatorApp(QMainWindow):
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
 
-        # Header
+        # Header Container
         header = QFrame()
         header.setStyleSheet("background-color: #333; border-radius: 8px;")
-        h_layout = QHBoxLayout(header)
 
+        # Grid Layout for Perfect Centering
+        h_layout = QGridLayout(header)
+        h_layout.setContentsMargins(15, 5, 15, 5)
+
+        # --- WIDGET CREATION START (Must be before adding to layout) ---
         self.status_dot = QLabel("●")
         self.status_dot.setFont(QFont("Arial", 28))
         self.status_dot.setStyleSheet("color: #888;")
+
         self.status_lbl = QLabel("READY")
         self.status_lbl.setFont(QFont("Segoe UI", 14, QFont.Bold))
 
@@ -758,28 +796,23 @@ class VentilatorApp(QMainWindow):
         self.led_b_timer.timeout.connect(
             lambda: self.led_b.setStyleSheet("background-color: #111; border-radius: 8px; border: 1px solid #555;"))
 
+        # Lock Button (Center)
+        self.btn_lock = QPushButton("🔓 LOCK APP")
+        self.btn_lock.setToolTip("Locks the interface to prevent accidental stopping or closing.")
+        self.btn_lock.setFixedSize(140, 36)
+        self.btn_lock.setFont(QFont("Segoe UI", 10, QFont.Bold))
+        self.btn_lock.setStyleSheet("background-color: #007acc; color: white; border-radius: 4px; border: none;")
+        self.btn_lock.clicked.connect(self.toggle_lock)
+
         self.mode_lbl = QLabel("Mode: --")
         self.mode_lbl.setFont(QFont("Segoe UI", 16))
         self.mode_lbl.setStyleSheet("color: #00aaff;")
 
-        h_layout.addWidget(self.status_dot)
-        h_layout.addWidget(self.status_lbl)
-        h_layout.addWidget(self.seq_lbl)
-        h_layout.addSpacing(40)
-        h_layout.addWidget(lbl_rx_a)
-        h_layout.addWidget(self.led_a)
-        h_layout.addSpacing(15)
-        h_layout.addWidget(lbl_rx_b)
-        h_layout.addWidget(self.led_b)
-        h_layout.addStretch()
-        h_layout.addWidget(self.mode_lbl)
-
-        # LOGO Logic
+        # Logo Logic
         self.logo_lbl = ClickableLabel()
         self.logo_lbl.setCursor(Qt.PointingHandCursor)
         self.logo_lbl.clicked.connect(self.show_about_dialog)
 
-        # --- PATH FIX START ---
         if getattr(sys, 'frozen', False):
             base_path = Path(sys.executable).parent
         else:
@@ -793,18 +826,52 @@ class VentilatorApp(QMainWindow):
             logo_path = str(svg_file)
         elif png_file.exists():
             logo_path = str(png_file)
-        # --- PATH FIX END ---
+
+        # --- LAYOUT CONSTRUCTION ---
+        # 1. Left Container
+        left_container = QWidget()
+        left_layout = QHBoxLayout(left_container)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(15)
+
+        left_layout.addWidget(self.status_dot)
+        left_layout.addWidget(self.status_lbl)
+        left_layout.addWidget(self.seq_lbl)
+        left_layout.addSpacing(25)
+        left_layout.addWidget(lbl_rx_a)
+        left_layout.addWidget(self.led_a)
+        left_layout.addWidget(lbl_rx_b)
+        left_layout.addWidget(self.led_b)
+        left_layout.addStretch()
+
+        # 2. Right Container
+        right_container = QWidget()
+        right_layout = QHBoxLayout(right_container)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+
+        right_layout.addStretch()
+        right_layout.addWidget(self.mode_lbl)
 
         if logo_path:
             pix = QPixmap(logo_path)
             if not pix.isNull():
                 pix = pix.scaledToHeight(45, Qt.SmoothTransformation)
                 self.logo_lbl.setPixmap(pix)
-                h_layout.addSpacing(30)
-                h_layout.addWidget(self.logo_lbl)
-                h_layout.addSpacing(10)
+                right_layout.addSpacing(30)
+                right_layout.addWidget(self.logo_lbl)
+                right_layout.addSpacing(10)
 
-        # Graphs
+        # 3. Add to Grid
+        h_layout.addWidget(left_container, 0, 0)
+        h_layout.addWidget(self.btn_lock, 0, 1, Qt.AlignCenter)
+        h_layout.addWidget(right_container, 0, 2)
+
+        # 4. Set Stretch for Centering
+        h_layout.setColumnStretch(0, 1)
+        h_layout.setColumnStretch(1, 0)
+        h_layout.setColumnStretch(2, 1)
+
+        # --- GRAPH SETUP ---
         pg.setConfigOption('background', '#000000')
         pg.setConfigOption('foreground', '#d0d0d0')
         pg.setConfigOptions(antialias=True)
@@ -872,17 +939,10 @@ class VentilatorApp(QMainWindow):
         self.btn_action.setEnabled(False)
         self.btn_action.clicked.connect(self.toggle_logging)
 
-        self.btn_lock = QPushButton("🔒 LOCK APP\n(Prevent Changes)")
-        self.btn_lock.setToolTip("Locks the interface to prevent accidental stopping or closing.")
-        self.btn_lock.setMinimumHeight(60)
-        self.btn_lock.setFont(QFont("Segoe UI", 11, QFont.Bold))
-        self.btn_lock.setStyleSheet("background-color: #555; color: white; border-radius: 5px; padding: 5px;")
-        self.btn_lock.clicked.connect(self.toggle_lock)
-
+        # Layout Assembly (Lock button removed from here)
         r1_layout.addWidget(input_group, 2)
         r1_layout.addWidget(combo_group, 2)
-        r1_layout.addWidget(self.btn_action, 3)
-        r1_layout.addWidget(self.btn_lock, 1)
+        r1_layout.addWidget(self.btn_action, 4)
 
         r2_layout = QHBoxLayout()
         dash_font_lbl = QFont("Segoe UI", 10)
@@ -963,16 +1023,16 @@ class VentilatorApp(QMainWindow):
         self.f_plot.getViewBox().setMouseEnabled(x=not self.is_locked, y=not self.is_locked)
 
         if self.is_locked:
-            self.btn_lock.setText("🔒 UNLOCK\n(Allow Changes)")
-            self.btn_lock.setStyleSheet("background-color: #cc3300; color: white;")
+            self.btn_lock.setText("🔒 UNLOCK")
+            self.btn_lock.setStyleSheet("background-color: #cc3300; color: white; border-radius: 4px; border: none;")
             if self.is_logging:
                 self.btn_action.setStyleSheet("background-color: #333; color: #666; border-radius: 5px;")
             self.btn_action.setEnabled(False)
             self.input_id.setEnabled(False)
             self.combo_stop.setEnabled(False)
         else:
-            self.btn_lock.setText("🔒 LOCK APP\n(Prevent Changes)")
-            self.btn_lock.setStyleSheet("background-color: #555; color: white;")
+            self.btn_lock.setText("🔒 LOCK APP")
+            self.btn_lock.setStyleSheet("background-color: #007acc; color: white; border-radius: 4px; border: none;")
             if self.is_logging:
                 self.btn_action.setStyleSheet("background-color: #cc3300; color: white; border-radius: 5px;")
                 self.btn_action.setEnabled(True)
@@ -1037,6 +1097,7 @@ class VentilatorApp(QMainWindow):
             self.btn_action.setText("STOP RECORDING")
             self.btn_action.setStyleSheet("background-color: #cc3300; color: white; border-radius: 5px;")
 
+            # 1. Main Worker
             self.worker = VentilatorWorker(self.input_id.text().strip())
             self.worker.sig_status_update.connect(self.update_status)
             self.worker.sig_settings_msg.connect(self.update_mode_display)
@@ -1044,12 +1105,15 @@ class VentilatorApp(QMainWindow):
             self.worker.sig_waveform_data.connect(self.update_plot)
             self.worker.sig_rx_activity.connect(self.on_rx_activity)
             self.worker.sig_error.connect(self.handle_worker_error)
-
-            # Connect Self-Healing Signals
             self.worker.sig_connection_lost.connect(self.on_connection_lost)
             self.worker.sig_connection_restored.connect(self.on_connection_restored)
-
             self.worker.start()
+
+            # 2. Snapshot Worker (New Feature)
+            # Pass the path to the DB (it will connect on its own inside the thread)
+            db_path = self.worker.base_folder / "syncrone.db"
+            self.snapshot_worker = SnapshotWorker(db_path, self.worker.base_folder)
+            self.snapshot_worker.start()
 
             self.last_pkt_time = time.monotonic()
             self.is_in_silence = False
@@ -1058,7 +1122,15 @@ class VentilatorApp(QMainWindow):
             self.stop_logging_procedure("User Request")
 
     def stop_logging_procedure(self, reason):
-        if hasattr(self, 'worker'): self.worker.stop()
+        if hasattr(self, 'worker') and self.worker:
+            self.worker.stop()
+
+        # Stop Snapshot Worker
+        if hasattr(self, 'snapshot_worker') and self.snapshot_worker:
+            self.snapshot_worker.is_running = False
+            self.snapshot_worker.wait()
+            self.snapshot_worker = None
+
         self.watchdog_timer.stop()
         self.ui_timer.stop()
 
@@ -1090,13 +1162,12 @@ class VentilatorApp(QMainWindow):
         if self.is_reconnecting: return
         self.is_reconnecting = True
 
-        # Calculate valid duration up to this moment and save it
         if self.segment_start_time:
             now = datetime.now()
             delta = (now - self.segment_start_time).total_seconds()
             self.accumulated_duration += delta
 
-        self.segment_start_time = None  # Stop the current segment
+        self.segment_start_time = None
         self.update_status("RECONNECTING...", "#ffa500")
 
     @Slot()
@@ -1155,7 +1226,7 @@ class VentilatorApp(QMainWindow):
         if not self.has_data_started:
             self.has_data_started = True
             self.session_start_time = datetime.now()
-            self.segment_start_time = self.session_start_time  # Init segment
+            self.segment_start_time = self.session_start_time
             self.lbl_started.setText(self.session_start_time.strftime("%b %d @ %I:%M %p"))
             self.ui_timer.start()
             self.update_status("RECORDING", "#00ff00")
@@ -1174,10 +1245,7 @@ class VentilatorApp(QMainWindow):
 
     def check_watchdog(self):
         if not self.is_logging: return
-        # If we are in reconnection mode, we don't need the watchdog to scream "Signal Lost"
-        # because the Status Bar already says "Reconnecting..."
         if self.is_reconnecting:
-            # Still append NaNs to keep graph moving or flat lining to show gap
             self.pressure_data.append(float('nan'))
             self.flow_data.append(float('nan'))
             self.p_curve.setData(self.x_axis_data, list(self.pressure_data))
@@ -1200,12 +1268,10 @@ class VentilatorApp(QMainWindow):
     def update_ui_dashboard(self):
         if not self.is_logging or not self.has_data_started: return
 
-        # Calculate Total Duration (Accumulated + Current Segment)
         total_sec = self.accumulated_duration
         if self.segment_start_time and not self.is_reconnecting:
             total_sec += (datetime.now() - self.segment_start_time).total_seconds()
 
-        # Format HH:MM:SS
         m, s = divmod(int(total_sec), 60)
         h, m = divmod(m, 60)
         self.lbl_duration.setText(f"{h:02d}:{m:02d}:{s:02d}")
