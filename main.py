@@ -20,7 +20,7 @@ import serial.tools.list_ports
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QHBoxLayout, QPushButton, QLabel, QFrame, QMessageBox,
                                QLineEdit, QComboBox, QSizePolicy, QDialog, QDialogButtonBox,
-                               QGridLayout)  # Added QGridLayout
+                               QGridLayout)
 from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer, QEvent
 from PySide6.QtGui import QFont, QIcon, QColor, QCloseEvent, QPixmap, QMouseEvent
 
@@ -30,7 +30,7 @@ import pyqtgraph as pg
 # -----------------------------------------------------------------------------
 # GLOBAL CONSTANTS
 # -----------------------------------------------------------------------------
-APP_VERSION = "1.0.0 (Dev)"
+APP_VERSION = "1.2.1 (Stable)"
 
 
 # -----------------------------------------------------------------------------
@@ -161,26 +161,28 @@ class DatabaseManager:
 
 
 # -----------------------------------------------------------------------------
-# 2. MARKER MANAGEMENT
+# 2. MARKER MANAGEMENT (Synchronized)
 # -----------------------------------------------------------------------------
 class BreathMarker:
     def __init__(self, plot_item, seq_num, y_offset=0):
         self.plot_item = plot_item
         self.seq_num = seq_num
-        self.age_samples = 0
-        self.sample_interval = 0.02
-        self.line = pg.InfiniteLine(pos=0, angle=90, pen=pg.mkPen('#555', width=1, style=Qt.DashLine))
+        # Align marker with the last data point on the x-axis (-0.02s)
+        self.x_pos = -0.02
+
+        self.line = pg.InfiniteLine(pos=self.x_pos, angle=90, pen=pg.mkPen('#555', width=1, style=Qt.DashLine))
         self.text = pg.TextItem(text=f"#{seq_num}", anchor=(0, 1), color="#ffa500")
-        self.text.setPos(0, y_offset)
+        self.text.setPos(self.x_pos, y_offset)
+
         self.plot_item.addItem(self.line)
         self.plot_item.addItem(self.text)
 
-    def update_position(self):
-        self.age_samples += 1
-        x_pos = -(self.age_samples * self.sample_interval)
-        self.line.setPos(x_pos)
-        self.text.setPos(x_pos, self.text.y())
-        return x_pos
+    def shift(self, distance):
+        """ Mechanically shifts the marker left/right by 'distance' """
+        self.x_pos += distance
+        self.line.setPos(self.x_pos)
+        self.text.setPos(self.x_pos, self.text.y())
+        return self.x_pos
 
     def destroy(self):
         try:
@@ -191,7 +193,7 @@ class BreathMarker:
 
 
 class BreathMarkerManager:
-    def __init__(self, plot_item, name="Manager"):
+    def __init__(self, plot_item):
         self.plot_item = plot_item
         self.markers = {}
 
@@ -203,11 +205,18 @@ class BreathMarkerManager:
         except:
             pass
 
-    def update_all(self):
+    def move_all(self, step_size):
+        """
+        Moves ALL markers by step_size.
+        Call this EXACTLY once for every data point added to the graph.
+        """
         expired_ids = []
         for seq_num, marker in self.markers.items():
-            x_pos = marker.update_position()
-            if x_pos < -10.0: expired_ids.append(seq_num)
+            new_x = marker.shift(step_size)
+            # Remove if it scrolls off the left side (-10.0 seconds)
+            if new_x < -10.0:
+                expired_ids.append(seq_num)
+
         for seq_num in expired_ids:
             self.markers[seq_num].destroy()
             del self.markers[seq_num]
@@ -623,6 +632,24 @@ class VentilatorApp(QMainWindow):
         self.session_breath_count = 0
         self.start_disk_space = 0
 
+        # RENDER QUEUE & TIMING (Jitter Buffer)
+        self.render_queue = deque()
+        self.render_timer = QTimer()
+        self.render_timer.setInterval(20)  # Target 20ms (50Hz)
+        self.render_timer.timeout.connect(self.render_loop)
+
+        # Drift & Latency Control Variables
+        self.last_render_call = time.monotonic()
+        self.fractional_samples = 0.0
+        self.last_pkt_time = 0
+        self.is_in_silence = False
+
+        # Buffer Synchronization
+        self.pending_seq_num = None  # Holds the sequence ID until data arrives
+        self.is_buffering = True
+        self.buffer_start_time = None
+        self.TARGET_LATENCY = 0.5  # 500ms safety margin
+
         # Config State
         self.base_folder = Path.home() / "Desktop" / "Syncron-E Data"
         self.base_folder.mkdir(parents=True, exist_ok=True)
@@ -633,13 +660,6 @@ class VentilatorApp(QMainWindow):
         # Threads
         self.worker = None
         self.snapshot_worker = None
-
-        # Watchdog
-        self.last_pkt_time = 0
-        self.is_in_silence = False
-        self.watchdog_timer = QTimer()
-        self.watchdog_timer.setInterval(20)  # 50Hz
-        self.watchdog_timer.timeout.connect(self.check_watchdog)
 
         # 1Hz UI Timer
         self.ui_timer = QTimer()
@@ -1088,6 +1108,18 @@ class VentilatorApp(QMainWindow):
             self.session_start_time = None
             self.segment_start_time = None
 
+            # Reset Jitter Buffer
+            self.render_queue.clear()
+            self.fractional_samples = 0.0
+            self.last_render_call = time.monotonic()
+
+            # Reset Latency State
+            self.pending_seq_num = None
+            self.is_buffering = True
+            self.buffer_start_time = None
+
+            self.render_timer.start()
+
             self.lbl_started.setText("WAITING FOR DATA...")
             self.lbl_duration.setText("WAITING...")
             self.lbl_breaths.setText("0")
@@ -1117,7 +1149,6 @@ class VentilatorApp(QMainWindow):
 
             self.last_pkt_time = time.monotonic()
             self.is_in_silence = False
-            self.watchdog_timer.start()
         else:
             self.stop_logging_procedure("User Request")
 
@@ -1131,8 +1162,8 @@ class VentilatorApp(QMainWindow):
             self.snapshot_worker.wait()
             self.snapshot_worker = None
 
-        self.watchdog_timer.stop()
         self.ui_timer.stop()
+        self.render_timer.stop()
 
         self.is_logging = False
         self.input_id.setEnabled(not self.is_locked)
@@ -1197,11 +1228,16 @@ class VentilatorApp(QMainWindow):
 
     @Slot(str)
     def update_breath_index(self, seq_num):
+        """
+        Stores the breath ID. It will be attached to the NEXT data point
+        that arrives via update_plot, ensuring synchronization.
+        """
         html = f"<html><head/><body><span style='font-weight:600; color:#ffa500;'>Breath Index:</span> <span style='font-weight:400; color:#ffffff;'>#{seq_num}</span></body></html>"
         self.seq_lbl.setText(html)
 
-        self.p_markers.add_marker(seq_num)
-        self.f_markers.add_marker(seq_num)
+        # Store pending sequence to attach to the next data point in the buffer
+        self.pending_seq_num = seq_num
+
         if self.is_logging and self.has_data_started:
             self.session_breath_count += 1
             self.lbl_breaths.setText(f"{self.session_breath_count:,}")
@@ -1221,49 +1257,116 @@ class VentilatorApp(QMainWindow):
 
     @Slot(float, float)
     def update_plot(self, p, f):
-        self.last_pkt_time = time.monotonic()
+        """
+        Received a point from the Serial Worker.
+        Attach any pending breath marker, then queue it.
+        """
+        # Attach seq_num if one is pending, else None
+        marker_id = self.pending_seq_num
+        self.pending_seq_num = None
 
-        if not self.has_data_started:
-            self.has_data_started = True
-            self.session_start_time = datetime.now()
-            self.segment_start_time = self.session_start_time
-            self.lbl_started.setText(self.session_start_time.strftime("%b %d @ %I:%M %p"))
-            self.ui_timer.start()
-            self.update_status("RECORDING", "#00ff00")
+        # Queue: (Pressure, Flow, MarkerID)
+        self.render_queue.append((p, f, marker_id))
 
+        # Update connection status immediately (visual feedback)
         if self.is_in_silence:
             self.is_in_silence = False
             if not self.is_reconnecting:
                 self.update_status("RECORDING", "#00ff00")
 
-        self.pressure_data.append(p)
-        self.flow_data.append(f)
-        self.p_curve.setData(self.x_axis_data, list(self.pressure_data))
-        self.f_curve.setData(self.x_axis_data, list(self.flow_data))
-        self.p_markers.update_all()
-        self.f_markers.update_all()
-
-    def check_watchdog(self):
+    def render_loop(self):
+        """
+        Continuous Pacer (50Hz) with Pre-Roll Latency Buffer.
+        Waits for 500ms of data before starting playback to ensure smoothness.
+        If buffer runs dry, it implies true disconnect, so we show NaN gaps.
+        """
         if not self.is_logging: return
-        if self.is_reconnecting:
-            self.pressure_data.append(float('nan'))
-            self.flow_data.append(float('nan'))
-            self.p_curve.setData(self.x_axis_data, list(self.pressure_data))
-            self.f_curve.setData(self.x_axis_data, list(self.flow_data))
-            self.p_markers.update_all()
-            self.f_markers.update_all()
-            return
 
-        if time.monotonic() - self.last_pkt_time > 0.1:
-            if not self.is_in_silence:
-                self.is_in_silence = True
-                self.update_status("SIGNAL LOST", "#ff0000")
-            self.pressure_data.append(float('nan'))
-            self.flow_data.append(float('nan'))
+        # 1. TIME DELTA CALCULATION
+        now = time.monotonic()
+        dt = now - self.last_render_call
+        self.last_render_call = now
+
+        # --- PHASE 1: PRE-ROLL BUFFERING ---
+        if self.is_buffering:
+            if len(self.render_queue) > 0:
+                if self.buffer_start_time is None:
+                    self.buffer_start_time = now
+
+                # Check if we have buffered enough latency
+                if (now - self.buffer_start_time) >= self.TARGET_LATENCY:
+                    self.is_buffering = False
+            return  # Wait until buffer is ready
+
+        # --- PHASE 2: PLAYBACK ---
+        self.fractional_samples += (dt * 50.0)
+        count_to_pop = int(self.fractional_samples)
+        self.fractional_samples -= count_to_pop
+
+        # Queue Overflow Protection
+        queue_len = len(self.render_queue)
+        if queue_len > 100: count_to_pop += 1
+        if queue_len > 300: count_to_pop += 5
+
+        did_update = False
+
+        for _ in range(count_to_pop):
+            if self.render_queue:
+                # -- A. HAS DATA --
+                # Pop (Pressure, Flow, MarkerID)
+                p, f, m_id = self.render_queue.popleft()
+
+                self.pressure_data.append(p)
+                self.flow_data.append(f)
+
+                # If this point has a Marker ID attached, spawn the marker now
+                if m_id:
+                    self.p_markers.add_marker(m_id, y_offset=10)
+                    self.f_markers.add_marker(m_id, y_offset=10)
+
+                # Synchronize Markers
+                self.p_markers.move_all(-0.02)
+                self.f_markers.move_all(-0.02)
+
+                did_update = True
+
+                if self.is_in_silence:
+                    self.is_in_silence = False
+                    self.update_status("RECORDING", "#00ff00")
+            else:
+                # -- B. STARVATION (Real Disconnect / Empty) --
+                # If we run out despite the buffer, it's a real gap.
+                self.pressure_data.append(float('nan'))
+                self.flow_data.append(float('nan'))
+
+                self.p_markers.move_all(-0.02)
+                self.f_markers.move_all(-0.02)
+                did_update = True
+
+        # 3. REFRESH GRAPH
+        if did_update:
             self.p_curve.setData(self.x_axis_data, list(self.pressure_data))
             self.f_curve.setData(self.x_axis_data, list(self.flow_data))
-            self.p_markers.update_all()
-            self.f_markers.update_all()
+
+            # Check for prolonged silence (Alarm)
+            if self.render_queue:
+                self.last_pkt_time = now
+
+            if (now - self.last_pkt_time) > 5.0:
+                if not self.is_in_silence:
+                    self.is_in_silence = True
+                    self.update_status("SIGNAL LOST", "#ff0000")
+                    # Optional: Re-enter buffering state on reconnect
+                    self.is_buffering = True
+                    self.buffer_start_time = None
+
+            # UI Start Logic
+            if not self.has_data_started and did_update:
+                self.has_data_started = True
+                self.session_start_time = datetime.now()
+                self.segment_start_time = self.session_start_time
+                self.lbl_started.setText(self.session_start_time.strftime("%b %d @ %I:%M %p"))
+                self.ui_timer.start()
 
     def update_ui_dashboard(self):
         if not self.is_logging or not self.has_data_started: return
