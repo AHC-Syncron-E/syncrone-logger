@@ -8,6 +8,8 @@ import sqlite3
 import traceback
 import os
 import json
+import code  # Required for the embedded console
+from io import StringIO  # Required to capture print() output
 from pathlib import Path
 from datetime import datetime, timedelta
 from collections import deque
@@ -17,12 +19,13 @@ import serial
 import serial.tools.list_ports
 
 # GUI Components
+# --- ADDED QInputDialog to imports ---
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QHBoxLayout, QPushButton, QLabel, QFrame, QMessageBox,
                                QLineEdit, QComboBox, QSizePolicy, QDialog, QDialogButtonBox,
-                               QGridLayout)
+                               QGridLayout, QPlainTextEdit, QInputDialog)
 from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer, QEvent
-from PySide6.QtGui import QFont, QIcon, QColor, QCloseEvent, QPixmap, QMouseEvent
+from PySide6.QtGui import QFont, QIcon, QColor, QCloseEvent, QPixmap, QMouseEvent, QTextCursor
 
 # Graphing
 import pyqtgraph as pg
@@ -30,7 +33,10 @@ import pyqtgraph as pg
 # -----------------------------------------------------------------------------
 # GLOBAL CONSTANTS
 # -----------------------------------------------------------------------------
-APP_VERSION = "1.2.1 (Stable)"
+# Bumped to reflect structural change.
+# Data will now live in .syncrone_system/v1.2/
+APP_VERSION = "1.2.2"
+DEBUG_PIN = "REDACTED_PIN"  # PIN required to access internal debugger
 
 
 # -----------------------------------------------------------------------------
@@ -45,6 +51,208 @@ class ClickableLabel(QLabel):
         super().mousePressEvent(event)
 
 
+class EmbeddedTerminal(QDialog):
+    """
+    An in-process Python shell.
+    Allows executing commands within the running application's context.
+    Safe for AppLocker environments as it spawns no new processes.
+    """
+
+    def __init__(self, context_vars, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Syncron-E Internal Debugger")
+        self.resize(800, 600)
+        self.setStyleSheet("""
+            QDialog { background-color: #1e1e1e; }
+            QPlainTextEdit { 
+                background-color: #1e1e1e; 
+                color: #00ff00; 
+                font-family: Consolas, 'Courier New', monospace;
+                font-size: 11pt;
+                border: none;
+            }
+            QLineEdit {
+                background-color: #2b2b2b;
+                color: #ffffff;
+                font-family: Consolas, 'Courier New', monospace;
+                font-size: 11pt;
+                border-top: 1px solid #555;
+                padding: 5px;
+            }
+        """)
+
+        # Layout
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        # Output Display (Read-Only)
+        self.display = QPlainTextEdit()
+        self.display.setReadOnly(True)
+        layout.addWidget(self.display)
+
+        # Input Line
+        self.input_line = QLineEdit()
+        self.input_line.setPlaceholderText(">>> Type Python commands here...")
+        self.input_line.returnPressed.connect(self.execute_command)
+        layout.addWidget(self.input_line)
+
+        # Python Console Logic
+        # We pass 'context_vars' to locals so you can access 'app', 'worker', etc.
+        self.console = code.InteractiveConsole(locals=context_vars)
+
+        # Command History
+        self.history = []
+        self.history_idx = 0
+
+        # Welcome Message
+        self.write_output(f"--- SYNCRONE INTERNAL SHELL ---\nPython {sys.version}\n")
+        self.write_output("Locals available: 'window', 'worker', 'serial', 'os', 'sys'\n")
+        self.write_output("WARNING: This shell interacts directly with the live application.\n")
+        self.write_output("-" * 40 + "\n")
+        self.input_line.setFocus()
+
+    def write_output(self, text):
+        self.display.moveCursor(QTextCursor.End)
+        self.display.insertPlainText(text)
+        self.display.moveCursor(QTextCursor.End)
+
+    def execute_command(self):
+        cmd = self.input_line.text()
+        self.write_output(f">>> {cmd}\n")
+        self.history.append(cmd)
+        self.history_idx = len(self.history)
+        self.input_line.clear()
+
+        if cmd.strip() == "clear":
+            self.display.clear()
+            return
+
+        if cmd.strip() == "exit":
+            self.accept()
+            return
+
+        # Redirect stdout/stderr to capture output
+        old_stdout = sys.stdout
+        old_stderr = sys.stderr
+        captured_output = StringIO()
+
+        try:
+            sys.stdout = captured_output
+            sys.stderr = captured_output
+
+            # This executes the command in the shell
+            # it returns True if more input is needed (multiline), False otherwise
+            more = self.console.push(cmd)
+
+            if more:
+                self.write_output("... (multiline input not fully supported in this simple shell)\n")
+
+        except Exception as e:
+            captured_output.write(f"{e}\n")
+        finally:
+            # Restore stdout
+            sys.stdout = old_stdout
+            sys.stderr = old_stderr
+
+            # Print whatever was captured
+            output = captured_output.getvalue()
+            if output:
+                self.write_output(output)
+
+    def keyPressEvent(self, event):
+        # History navigation (Up/Down arrows)
+        if event.key() == Qt.Key_Up:
+            if self.history and self.history_idx > 0:
+                self.history_idx -= 1
+                self.input_line.setText(self.history[self.history_idx])
+        elif event.key() == Qt.Key_Down:
+            if self.history and self.history_idx < len(self.history) - 1:
+                self.history_idx += 1
+                self.input_line.setText(self.history[self.history_idx])
+            else:
+                self.history_idx = len(self.history)
+                self.input_line.clear()
+
+        super().keyPressEvent(event)
+
+
+class AboutDialog(QDialog):
+    def __init__(self, parent_window):
+        super().__init__(parent_window)
+        self.parent_window = parent_window
+        self.setWindowTitle("About Syncron-E")
+        self.setFixedSize(400, 300)
+        self.setStyleSheet("background-color: #2b2b2b; color: #ffffff;")
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(15)
+        layout.setContentsMargins(30, 30, 30, 30)
+
+        # Title
+        lbl_title = QLabel("Syncron-E Waveform Recorder")
+        lbl_title.setFont(QFont("Segoe UI", 16, QFont.Bold))
+        lbl_title.setAlignment(Qt.AlignCenter)
+
+        # Version
+        lbl_ver = QLabel(f"Version {APP_VERSION}")
+        lbl_ver.setStyleSheet("color: #aaa;")
+        lbl_ver.setAlignment(Qt.AlignCenter)
+
+        # Info
+        lbl_info = QLabel("Autonomous Healthcare, Inc.\nsupport@autonomoushealthcare.com")
+        lbl_info.setAlignment(Qt.AlignCenter)
+        lbl_info.setStyleSheet("color: #ddd;")
+
+        # Button
+        self.btn_debug = QPushButton("Launch Internal Debugger")
+        self.btn_debug.setFixedHeight(40)
+        self.btn_debug.setStyleSheet("background-color: #444; color: #ccc; border: 1px solid #666; border-radius: 4px;")
+        self.btn_debug.clicked.connect(self.launch_shell)
+
+        # Adjust button style if recording to warn user
+        if self.parent_window.is_logging:
+            self.btn_debug.setText("Debugger (CAUTION: Recording Active)")
+            self.btn_debug.setStyleSheet(
+                "background-color: #552200; color: #ffa500; border: 1px solid #ffaa00; border-radius: 4px;")
+
+        layout.addWidget(lbl_title)
+        layout.addWidget(lbl_ver)
+        layout.addWidget(lbl_info)
+        layout.addStretch()
+        layout.addWidget(self.btn_debug)
+        layout.addWidget(QDialogButtonBox(QDialogButtonBox.Ok, accepted=self.accept))
+
+    def launch_shell(self):
+        # 1. Ask for PIN
+        text, ok = QInputDialog.getText(self, "Restricted Access",
+                                        "Enter Debug PIN:",
+                                        QLineEdit.Password)
+
+        if not ok:
+            return  # User cancelled
+
+        if text != DEBUG_PIN:
+            QMessageBox.warning(self, "Access Denied", "Incorrect PIN.")
+            return
+
+        # 2. Context Setup
+        context = {
+            'window': self.parent_window,
+            'worker': self.parent_window.worker,
+            'serial': serial,
+            'sys': sys,
+            'os': os,
+            'sqlite3': sqlite3,
+            'db_manager': self.parent_window.worker.db_manager if self.parent_window.worker else None
+        }
+
+        # 3. Close About dialog and Launch Terminal
+        self.accept()
+        console = EmbeddedTerminal(context, self.parent_window)
+        console.exec()
+
+
 # -----------------------------------------------------------------------------
 # 1. DATABASE MANAGER
 # -----------------------------------------------------------------------------
@@ -55,6 +263,10 @@ class DatabaseManager:
         self.cursor = None
 
     def connect(self):
+        # Create parent dir if missing (e.g. .syncrone_system/v1.2/)
+        if not self.db_path.parent.exists():
+            self.db_path.parent.mkdir(parents=True, exist_ok=True)
+
         if self.db_path.exists():
             if self._needs_migration():
                 self._backup_and_reset()
@@ -200,6 +412,7 @@ class BreathMarkerManager:
     def add_marker(self, seq_num, y_offset=0):
         if seq_num in self.markers: return
         try:
+            # Create marker at x=0 (Current time)
             marker = BreathMarker(self.plot_item, seq_num, y_offset)
             self.markers[seq_num] = marker
         except:
@@ -229,7 +442,7 @@ class SnapshotWorker(QThread):
     def __init__(self, db_path, output_folder):
         super().__init__()
         self.db_path = str(db_path)
-        self.output_folder = output_folder
+        self.output_folder = output_folder  # This is likely the USER visible folder
         self.is_running = True
 
     def run(self):
@@ -298,14 +511,36 @@ class VentilatorWorker(QThread):
         super().__init__()
         self.patient_id = patient_id
         self.is_running = False
+
+        # --- PATH LOGIC ---
+        # 1. Root Folder (User Facing)
+        self.root_folder = Path.home() / "Desktop" / "Syncron-E Data"
+
+        # 2. System Folder (Hidden, Versioned)
+        # We extract "Major.Minor" to group compatible versions, or full version for safety.
+        # Let's use full version "1.2.2" to be perfectly safe against schema changes.
+        safe_version = APP_VERSION.replace(" ", "_").replace("(", "").replace(")", "")
+        self.system_folder = self.root_folder / ".syncrone_system" / f"v{safe_version}"
+
+        # 3. Sub-folders for organization
+        self.logs_folder = self.system_folder / "logs"
+        self.raw_data_folder = self.system_folder / "raw_data"
+
+        # Create directories
+        self.root_folder.mkdir(parents=True, exist_ok=True)
+        self.logs_folder.mkdir(parents=True, exist_ok=True)
+        self.raw_data_folder.mkdir(parents=True, exist_ok=True)
+
+        # --- FILE HANDLES ---
         self.port_a = None
         self.port_b = None
         self.waveform_port = None
         self.settings_port = None
-        self.base_folder = Path.home() / "Desktop" / "Syncron-E Data"
+
         self.file_waveform = None
         self.file_settings = None
         self.db_manager = None
+
         self.buffer_a = ""
         self.buffer_b = ""
         self.waveform_line_buffer = ""
@@ -318,17 +553,20 @@ class VentilatorWorker(QThread):
         self.reconnect_timeout_seconds = 120
 
     def open_log_files(self):
-        self.base_folder.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.current_file_date = datetime.now().date()
+
+        # Store raw logs in the hidden raw_data_folder
         wf_name = f"waveforms_{timestamp}.txt"
         st_name = f"settings_{timestamp}.txt"
-        self.file_waveform = open(self.base_folder / wf_name, 'a', encoding='utf-8', buffering=1)
-        self.file_settings = open(self.base_folder / st_name, 'a', encoding='utf-8', buffering=1)
+
+        self.file_waveform = open(self.raw_data_folder / wf_name, 'a', encoding='utf-8', buffering=1)
+        self.file_settings = open(self.raw_data_folder / st_name, 'a', encoding='utf-8', buffering=1)
 
     def log_unidentified_data(self, source_port, data):
         try:
-            debug_file = self.base_folder / "startup_debug_log.txt"
+            # Debug log goes into hidden logs folder
+            debug_file = self.logs_folder / "startup_debug_log.txt"
             with open(debug_file, "a", encoding='utf-8') as f:
                 clean = data.replace('\n', '\\n').replace('\r', '\\r')
                 ts = datetime.now().strftime("%H:%M:%S.%f")
@@ -357,8 +595,8 @@ class VentilatorWorker(QThread):
                 pass
 
     def setup_system(self):
-        self.base_folder.mkdir(parents=True, exist_ok=True)
-        db_path = self.base_folder / "syncrone.db"
+        # Database goes into the versioned system folder
+        db_path = self.system_folder / "syncrone.db"
         self.db_manager = DatabaseManager(str(db_path))
         self.db_manager.connect()
         self.open_log_files()
@@ -599,7 +837,8 @@ class VentilatorWorker(QThread):
 
     def log_crash(self, e):
         try:
-            with open(self.base_folder / "error_log.txt", "a") as f:
+            # Error logs go into the hidden logs folder too
+            with open(self.logs_folder / "error_log.txt", "a") as f:
                 f.write(f"\n[CRASH {datetime.now()}] {str(e)}\n{traceback.format_exc()}\n")
         except:
             pass
@@ -651,6 +890,7 @@ class VentilatorApp(QMainWindow):
         self.TARGET_LATENCY = 0.5  # 500ms safety margin
 
         # Config State
+        # Root folder remains on Desktop for user visibility
         self.base_folder = Path.home() / "Desktop" / "Syncron-E Data"
         self.base_folder.mkdir(parents=True, exist_ok=True)
 
@@ -758,6 +998,10 @@ class VentilatorApp(QMainWindow):
 
     def log_debug(self, msg):
         try:
+            # We assume user errors could still go to root, or we could move them too.
+            # For now, let's put error_log inside the system/logs folder if worker is active,
+            # but if worker isn't active, we might need a fallback.
+            # Safest is to log to root for critical GUI failures that prevent worker startup.
             with open(self.base_folder / "error_log.txt", "a") as f:
                 f.write(f"[LOG {datetime.now()}] {msg}\n")
         except:
@@ -1022,12 +1266,9 @@ class VentilatorApp(QMainWindow):
         layout.addWidget(footer, 2)
 
     def show_about_dialog(self):
-        msg = QMessageBox(self)
-        msg.setWindowTitle("About")
-        msg.setText(f"<b>Syncron-E Waveform Recorder</b><br>v{APP_VERSION}")
-        msg.setInformativeText("Autonomous Healthcare, Inc.<br><br>Support: support@autonomoushealthcare.com")
-        msg.setIcon(QMessageBox.Information)
-        msg.exec()
+        # Modified to use the new interactive AboutDialog
+        dlg = AboutDialog(self)
+        dlg.exec()
 
     def closeEvent(self, event: QCloseEvent):
         if self.is_logging or self.is_locked:
@@ -1143,8 +1384,10 @@ class VentilatorApp(QMainWindow):
 
             # 2. Snapshot Worker (New Feature)
             # Pass the path to the DB (it will connect on its own inside the thread)
-            db_path = self.worker.base_folder / "syncrone.db"
-            self.snapshot_worker = SnapshotWorker(db_path, self.worker.base_folder)
+            # The DB path is now hidden in the system folder
+            db_path = self.worker.system_folder / "syncrone.db"
+            # But the OUTPUT folder for the snapshot TXT files must remain user-visible (root)
+            self.snapshot_worker = SnapshotWorker(db_path, self.base_folder)
             self.snapshot_worker.start()
 
             self.last_pkt_time = time.monotonic()
@@ -1402,7 +1645,10 @@ if __name__ == "__main__":
     def exception_hook(exctype, value, tb):
         error_msg = "".join(traceback.format_exception(exctype, value, tb))
         try:
-            with open(Path.home() / "Desktop" / "Syncron-E Data" / "error_log.txt", "a") as f:
+            # Attempt to write to the new log location if possible
+            # We construct the path manually here since 'window' might not be initialized
+            log_path = Path.home() / "Desktop" / "Syncron-E Data" / "error_log.txt"
+            with open(log_path, "a") as f:
                 f.write(f"\n[GUI CRASH {datetime.now()}]\n{error_msg}\n")
         except:
             pass
