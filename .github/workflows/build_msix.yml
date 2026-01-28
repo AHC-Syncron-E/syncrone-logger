@@ -47,7 +47,8 @@ jobs:
       - name: Inject Version into Code
         run: |
           $ver = "${{ env.APP_VERSION }}"
-          (Get-Content main.py).replace('APP_VERSION = "1.0.0 (Dev)"', "APP_VERSION = `"$ver`"") | Set-Content main.py
+          # Use Regex (-replace) to match 'APP_VERSION = "..."' regardless of what is inside the quotes
+          (Get-Content main.py) -replace 'APP_VERSION = ".*?"', "APP_VERSION = `"$ver`"" | Set-Content main.py
 
       # --- 2. Compile with Nuitka ---
       - name: Compile Standalone

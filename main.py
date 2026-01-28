@@ -509,8 +509,17 @@ class VentilatorWorker(QThread):
 
         # --- PATH LOGIC ---
         self.root_folder = Path.home() / "Desktop" / "Syncron-E Data"
-        safe_version = APP_VERSION.replace(" ", "_").replace("(", "").replace(")", "")
-        self.system_folder = self.root_folder / ".syncrone_system" / f"v{safe_version}"
+
+        # FIX: Extract only Major.Minor for storage stability
+        # "1.2.3.45" -> "1.2"
+        # "1.2" -> "1.2"
+        version_parts = APP_VERSION.split('.')
+        storage_version = "1.0"  # Fallback
+        if len(version_parts) >= 2:
+            storage_version = f"{version_parts[0]}.{version_parts[1]}"
+
+        # This ensures v1.2.3.45 and v1.2.3.46 both use ".../v1.2"
+        self.system_folder = self.root_folder / ".syncrone_system" / f"v{storage_version}"
 
         self.logs_folder = self.system_folder / "logs"
         self.raw_data_folder = self.system_folder / "raw_data"
