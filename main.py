@@ -14,12 +14,14 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from collections import deque
 
+# --- FIX: NUMPY IMPORT ---
+import numpy as np
+
 # Serial Communication
 import serial
 import serial.tools.list_ports
 
 # GUI Components
-# --- ADDED QInputDialog to imports ---
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QHBoxLayout, QPushButton, QLabel, QFrame, QMessageBox,
                                QLineEdit, QComboBox, QSizePolicy, QDialog, QDialogButtonBox,
@@ -33,9 +35,7 @@ import pyqtgraph as pg
 # -----------------------------------------------------------------------------
 # GLOBAL CONSTANTS
 # -----------------------------------------------------------------------------
-# Bumped to reflect structural change.
-# Data will now live in .syncrone_system/v1.2/
-APP_VERSION = "1.2.2"
+APP_VERSION = "1.2.3"  # Bumped version
 DEBUG_PIN = "REDACTED_PIN"  # PIN required to access internal debugger
 
 
@@ -98,7 +98,6 @@ class EmbeddedTerminal(QDialog):
         layout.addWidget(self.input_line)
 
         # Python Console Logic
-        # We pass 'context_vars' to locals so you can access 'app', 'worker', etc.
         self.console = code.InteractiveConsole(locals=context_vars)
 
         # Command History
@@ -140,9 +139,6 @@ class EmbeddedTerminal(QDialog):
         try:
             sys.stdout = captured_output
             sys.stderr = captured_output
-
-            # This executes the command in the shell
-            # it returns True if more input is needed (multiline), False otherwise
             more = self.console.push(cmd)
 
             if more:
@@ -151,17 +147,13 @@ class EmbeddedTerminal(QDialog):
         except Exception as e:
             captured_output.write(f"{e}\n")
         finally:
-            # Restore stdout
             sys.stdout = old_stdout
             sys.stderr = old_stderr
-
-            # Print whatever was captured
             output = captured_output.getvalue()
             if output:
                 self.write_output(output)
 
     def keyPressEvent(self, event):
-        # History navigation (Up/Down arrows)
         if event.key() == Qt.Key_Up:
             if self.history and self.history_idx > 0:
                 self.history_idx -= 1
@@ -224,7 +216,6 @@ class AboutDialog(QDialog):
         layout.addWidget(QDialogButtonBox(QDialogButtonBox.Ok, accepted=self.accept))
 
     def launch_shell(self):
-        # 1. Ask for PIN
         text, ok = QInputDialog.getText(self, "Restricted Access",
                                         "Enter Debug PIN:",
                                         QLineEdit.Password)
@@ -236,7 +227,6 @@ class AboutDialog(QDialog):
             QMessageBox.warning(self, "Access Denied", "Incorrect PIN.")
             return
 
-        # 2. Context Setup
         context = {
             'window': self.parent_window,
             'worker': self.parent_window.worker,
@@ -247,7 +237,6 @@ class AboutDialog(QDialog):
             'db_manager': self.parent_window.worker.db_manager if self.parent_window.worker else None
         }
 
-        # 3. Close About dialog and Launch Terminal
         self.accept()
         console = EmbeddedTerminal(context, self.parent_window)
         console.exec()
@@ -263,7 +252,6 @@ class DatabaseManager:
         self.cursor = None
 
     def connect(self):
-        # Create parent dir if missing (e.g. .syncrone_system/v1.2/)
         if not self.db_path.parent.exists():
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -379,7 +367,6 @@ class BreathMarker:
     def __init__(self, plot_item, seq_num, y_offset=0):
         self.plot_item = plot_item
         self.seq_num = seq_num
-        # Align marker with the last data point on the x-axis (-0.02s)
         self.x_pos = -0.02
 
         self.line = pg.InfiniteLine(pos=self.x_pos, angle=90, pen=pg.mkPen('#555', width=1, style=Qt.DashLine))
@@ -390,7 +377,6 @@ class BreathMarker:
         self.plot_item.addItem(self.text)
 
     def shift(self, distance):
-        """ Mechanically shifts the marker left/right by 'distance' """
         self.x_pos += distance
         self.line.setPos(self.x_pos)
         self.text.setPos(self.x_pos, self.text.y())
@@ -412,21 +398,15 @@ class BreathMarkerManager:
     def add_marker(self, seq_num, y_offset=0):
         if seq_num in self.markers: return
         try:
-            # Create marker at x=0 (Current time)
             marker = BreathMarker(self.plot_item, seq_num, y_offset)
             self.markers[seq_num] = marker
         except:
             pass
 
     def move_all(self, step_size):
-        """
-        Moves ALL markers by step_size.
-        Call this EXACTLY once for every data point added to the graph.
-        """
         expired_ids = []
         for seq_num, marker in self.markers.items():
             new_x = marker.shift(step_size)
-            # Remove if it scrolls off the left side (-10.0 seconds)
             if new_x < -10.0:
                 expired_ids.append(seq_num)
 
@@ -461,36 +441,51 @@ class SnapshotWorker(QThread):
 
     def generate_files(self):
         cutoff = (datetime.now() - timedelta(hours=1)).isoformat()
+
+        # Connect to DB locally in this thread
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
-        # Waveforms
-        cursor.execute("SELECT raw_data FROM waveforms WHERE timestamp > ? ORDER BY id ASC", (cutoff,))
-        rows = cursor.fetchall()
-        if rows:
-            temp_name = self.output_folder / "~temp_last_1hr_wave.tmp"
-            final_name = self.output_folder / "LAST_1HOUR_WAVEFORMS.txt"
-            with open(temp_name, 'w', encoding='utf-8') as f:
-                for row in rows: f.write(row[0])
-            try:
-                if final_name.exists(): os.remove(final_name)
-                os.rename(temp_name, final_name)
-            except OSError:
-                if temp_name.exists(): os.remove(temp_name)
+        # Helper to stream data to disk (FIX: Streaming instead of fetchall)
+        def stream_to_file(query, filename):
+            temp_name = self.output_folder / f"~temp_{filename}.tmp"
+            final_name = self.output_folder / filename
 
-        # Settings
-        cursor.execute("SELECT raw_data FROM settings WHERE timestamp > ? ORDER BY id ASC", (cutoff,))
-        rows = cursor.fetchall()
-        if rows:
-            temp_name = self.output_folder / "~temp_last_1hr_settings.tmp"
-            final_name = self.output_folder / "LAST_1HOUR_SETTINGS.txt"
+            cursor.execute(query, (cutoff,))
+
+            has_data = False
             with open(temp_name, 'w', encoding='utf-8') as f:
-                for row in rows: f.write(row[0])
-            try:
-                if final_name.exists(): os.remove(final_name)
-                os.rename(temp_name, final_name)
-            except OSError:
-                if temp_name.exists(): os.remove(temp_name)
+                while True:
+                    # Fetch 1000 rows at a time to prevent RAM spikes
+                    batch = cursor.fetchmany(1000)
+                    if not batch: break
+                    has_data = True
+                    for row in batch:
+                        f.write(row[0])
+
+            if has_data:
+                if final_name.exists():
+                    try:
+                        os.remove(final_name)
+                    except:
+                        pass
+                try:
+                    os.rename(temp_name, final_name)
+                except:
+                    pass
+            else:
+                if temp_name.exists():
+                    try:
+                        os.remove(temp_name)
+                    except:
+                        pass
+
+        # 1. Stream Waveforms
+        stream_to_file("SELECT raw_data FROM waveforms WHERE timestamp > ? ORDER BY id ASC", "LAST_1HOUR_WAVEFORMS.txt")
+
+        # 2. Stream Settings
+        stream_to_file("SELECT raw_data FROM settings WHERE timestamp > ? ORDER BY id ASC", "LAST_1HOUR_SETTINGS.txt")
+
         conn.close()
 
 
@@ -513,25 +508,17 @@ class VentilatorWorker(QThread):
         self.is_running = False
 
         # --- PATH LOGIC ---
-        # 1. Root Folder (User Facing)
         self.root_folder = Path.home() / "Desktop" / "Syncron-E Data"
-
-        # 2. System Folder (Hidden, Versioned)
-        # We extract "Major.Minor" to group compatible versions, or full version for safety.
-        # Let's use full version "1.2.2" to be perfectly safe against schema changes.
         safe_version = APP_VERSION.replace(" ", "_").replace("(", "").replace(")", "")
         self.system_folder = self.root_folder / ".syncrone_system" / f"v{safe_version}"
 
-        # 3. Sub-folders for organization
         self.logs_folder = self.system_folder / "logs"
         self.raw_data_folder = self.system_folder / "raw_data"
 
-        # Create directories
         self.root_folder.mkdir(parents=True, exist_ok=True)
         self.logs_folder.mkdir(parents=True, exist_ok=True)
         self.raw_data_folder.mkdir(parents=True, exist_ok=True)
 
-        # --- FILE HANDLES ---
         self.port_a = None
         self.port_b = None
         self.waveform_port = None
@@ -552,11 +539,15 @@ class VentilatorWorker(QThread):
         self.waveform_pattern = re.compile(r"BS,\s*S:(\d+),")
         self.reconnect_timeout_seconds = 120
 
+        # --- FIX: THROTTLE TRACKERS ---
+        self.last_rx_emit_a = 0
+        self.last_rx_emit_b = 0
+        self.rx_throttle_interval = 0.1  # Limit to 10Hz
+
     def open_log_files(self):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.current_file_date = datetime.now().date()
 
-        # Store raw logs in the hidden raw_data_folder
         wf_name = f"waveforms_{timestamp}.txt"
         st_name = f"settings_{timestamp}.txt"
 
@@ -565,7 +556,6 @@ class VentilatorWorker(QThread):
 
     def log_unidentified_data(self, source_port, data):
         try:
-            # Debug log goes into hidden logs folder
             debug_file = self.logs_folder / "startup_debug_log.txt"
             with open(debug_file, "a", encoding='utf-8') as f:
                 clean = data.replace('\n', '\\n').replace('\r', '\\r')
@@ -595,7 +585,6 @@ class VentilatorWorker(QThread):
                 pass
 
     def setup_system(self):
-        # Database goes into the versioned system folder
         db_path = self.system_folder / "syncrone.db"
         self.db_manager = DatabaseManager(str(db_path))
         self.db_manager.connect()
@@ -689,9 +678,15 @@ class VentilatorWorker(QThread):
                     now = time.monotonic()
                     self.check_file_rotation()
 
+                    # --- PORT A HANDLING ---
                     if self.port_a and self.port_a.in_waiting > 0:
                         data_a = self.port_a.read(self.port_a.in_waiting).decode('latin-1', errors='ignore')
-                        self.sig_rx_activity.emit("A")
+
+                        # FIX: THROTTLE SIGNAL EMISSION
+                        if now - self.last_rx_emit_a > self.rx_throttle_interval:
+                            self.sig_rx_activity.emit("A")
+                            self.last_rx_emit_a = now
+
                         if not ports_identified:
                             self.log_unidentified_data("PORT_A", data_a)
                             self.buffer_a += data_a
@@ -704,9 +699,15 @@ class VentilatorWorker(QThread):
                             else:
                                 self.handle_settings(data_a)
 
+                    # --- PORT B HANDLING ---
                     if self.port_b and self.port_b.in_waiting > 0:
                         data_b = self.port_b.read(self.port_b.in_waiting).decode('latin-1', errors='ignore')
-                        self.sig_rx_activity.emit("B")
+
+                        # FIX: THROTTLE SIGNAL EMISSION
+                        if now - self.last_rx_emit_b > self.rx_throttle_interval:
+                            self.sig_rx_activity.emit("B")
+                            self.last_rx_emit_b = now
+
                         if not ports_identified:
                             self.log_unidentified_data("PORT_B", data_b)
                             self.buffer_b += data_b
@@ -837,7 +838,6 @@ class VentilatorWorker(QThread):
 
     def log_crash(self, e):
         try:
-            # Error logs go into the hidden logs folder too
             with open(self.logs_folder / "error_log.txt", "a") as f:
                 f.write(f"\n[CRASH {datetime.now()}] {str(e)}\n{traceback.format_exc()}\n")
         except:
@@ -872,7 +872,8 @@ class VentilatorApp(QMainWindow):
         self.start_disk_space = 0
 
         # RENDER QUEUE & TIMING (Jitter Buffer)
-        self.render_queue = deque()
+        # --- FIX: BOUNDED QUEUE TO PREVENT OOM ---
+        self.render_queue = deque(maxlen=2500)
         self.render_timer = QTimer()
         self.render_timer.setInterval(20)  # Target 20ms (50Hz)
         self.render_timer.timeout.connect(self.render_loop)
@@ -884,13 +885,12 @@ class VentilatorApp(QMainWindow):
         self.is_in_silence = False
 
         # Buffer Synchronization
-        self.pending_seq_num = None  # Holds the sequence ID until data arrives
+        self.pending_seq_num = None
         self.is_buffering = True
         self.buffer_start_time = None
         self.TARGET_LATENCY = 0.5  # 500ms safety margin
 
         # Config State
-        # Root folder remains on Desktop for user visibility
         self.base_folder = Path.home() / "Desktop" / "Syncron-E Data"
         self.base_folder.mkdir(parents=True, exist_ok=True)
 
@@ -911,7 +911,6 @@ class VentilatorApp(QMainWindow):
         self.prevent_sleep()
         self.init_ui()
 
-        # Trigger Config Alert if needed
         if self.config_corrupt_msg:
             QTimer.singleShot(500, lambda: QMessageBox.warning(self, "Config Reset", self.config_corrupt_msg))
 
@@ -969,7 +968,6 @@ class VentilatorApp(QMainWindow):
             return self._process_options(defaults)
 
     def _process_options(self, raw_list):
-        """ Validates structure and converts Units -> Seconds """
         processed = []
         for i, item in enumerate(raw_list):
             if not all(k in item for k in ("label", "type", "value", "unit")):
@@ -998,10 +996,6 @@ class VentilatorApp(QMainWindow):
 
     def log_debug(self, msg):
         try:
-            # We assume user errors could still go to root, or we could move them too.
-            # For now, let's put error_log inside the system/logs folder if worker is active,
-            # but if worker isn't active, we might need a fallback.
-            # Safest is to log to root for critical GUI failures that prevent worker startup.
             with open(self.base_folder / "error_log.txt", "a") as f:
                 f.write(f"[LOG {datetime.now()}] {msg}\n")
         except:
@@ -1020,7 +1014,7 @@ class VentilatorApp(QMainWindow):
         h_layout = QGridLayout(header)
         h_layout.setContentsMargins(15, 5, 15, 5)
 
-        # --- WIDGET CREATION START (Must be before adding to layout) ---
+        # --- WIDGET CREATION START ---
         self.status_dot = QLabel("●")
         self.status_dot.setFont(QFont("Arial", 28))
         self.status_dot.setStyleSheet("color: #888;")
@@ -1140,8 +1134,14 @@ class VentilatorApp(QMainWindow):
         pg.setConfigOption('foreground', '#d0d0d0')
         pg.setConfigOptions(antialias=True)
         self.plot_widget = pg.GraphicsLayoutWidget()
+
+        # --- FIX: NUMPY ARRAYS ---
         self.data_len = 500
-        self.x_axis_data = [x * 0.02 for x in range(-self.data_len, 0)]
+        # Pre-allocate arrays (float32 is enough precision and saves 50% RAM vs float64)
+        self.pressure_data = np.zeros(self.data_len, dtype=np.float32)
+        self.flow_data = np.zeros(self.data_len, dtype=np.float32)
+        # Pre-calculate X axis
+        self.x_axis_data = np.linspace(-10, -0.02, self.data_len, dtype=np.float32)
 
         self.p_plot = self.plot_widget.addPlot(title="Pressure (cmH2O)")
         self.p_plot.showGrid(x=True, y=True, alpha=0.3)
@@ -1154,9 +1154,6 @@ class VentilatorApp(QMainWindow):
         self.f_plot.showGrid(x=True, y=True, alpha=0.3)
         self.f_curve = self.f_plot.plot(pen=pg.mkPen('#ffff00', width=2), connect="finite")
         self.f_markers = BreathMarkerManager(self.f_plot)
-
-        self.pressure_data = deque([0] * self.data_len, maxlen=self.data_len)
-        self.flow_data = deque([0] * self.data_len, maxlen=self.data_len)
 
         # Footer
         footer = QFrame()
@@ -1350,7 +1347,9 @@ class VentilatorApp(QMainWindow):
             self.segment_start_time = None
 
             # Reset Jitter Buffer
-            self.render_queue.clear()
+            # --- FIX: BOUNDED QUEUE (Safety Valve) ---
+            self.render_queue = deque(maxlen=2500)
+
             self.fractional_samples = 0.0
             self.last_render_call = time.monotonic()
 
@@ -1382,11 +1381,8 @@ class VentilatorApp(QMainWindow):
             self.worker.sig_connection_restored.connect(self.on_connection_restored)
             self.worker.start()
 
-            # 2. Snapshot Worker (New Feature)
-            # Pass the path to the DB (it will connect on its own inside the thread)
-            # The DB path is now hidden in the system folder
+            # 2. Snapshot Worker
             db_path = self.worker.system_folder / "syncrone.db"
-            # But the OUTPUT folder for the snapshot TXT files must remain user-visible (root)
             self.snapshot_worker = SnapshotWorker(db_path, self.base_folder)
             self.snapshot_worker.start()
 
@@ -1432,7 +1428,6 @@ class VentilatorApp(QMainWindow):
     # --- SELF HEALING HANDLERS ---
     @Slot()
     def on_connection_lost(self):
-        """ Pauses duration timer and updates state """
         if self.is_reconnecting: return
         self.is_reconnecting = True
 
@@ -1446,7 +1441,6 @@ class VentilatorApp(QMainWindow):
 
     @Slot()
     def on_connection_restored(self):
-        """ Resumes duration timer """
         if not self.is_reconnecting: return
         self.is_reconnecting = False
         self.segment_start_time = datetime.now()
@@ -1471,14 +1465,9 @@ class VentilatorApp(QMainWindow):
 
     @Slot(str)
     def update_breath_index(self, seq_num):
-        """
-        Stores the breath ID. It will be attached to the NEXT data point
-        that arrives via update_plot, ensuring synchronization.
-        """
         html = f"<html><head/><body><span style='font-weight:600; color:#ffa500;'>Breath Index:</span> <span style='font-weight:400; color:#ffffff;'>#{seq_num}</span></body></html>"
         self.seq_lbl.setText(html)
 
-        # Store pending sequence to attach to the next data point in the buffer
         self.pending_seq_num = seq_num
 
         if self.is_logging and self.has_data_started:
@@ -1500,18 +1489,10 @@ class VentilatorApp(QMainWindow):
 
     @Slot(float, float)
     def update_plot(self, p, f):
-        """
-        Received a point from the Serial Worker.
-        Attach any pending breath marker, then queue it.
-        """
-        # Attach seq_num if one is pending, else None
         marker_id = self.pending_seq_num
         self.pending_seq_num = None
-
-        # Queue: (Pressure, Flow, MarkerID)
         self.render_queue.append((p, f, marker_id))
 
-        # Update connection status immediately (visual feedback)
         if self.is_in_silence:
             self.is_in_silence = False
             if not self.is_reconnecting:
@@ -1519,9 +1500,7 @@ class VentilatorApp(QMainWindow):
 
     def render_loop(self):
         """
-        Continuous Pacer (50Hz) with Pre-Roll Latency Buffer.
-        Waits for 500ms of data before starting playback to ensure smoothness.
-        If buffer runs dry, it implies true disconnect, so we show NaN gaps.
+        Optimized Pacer (50Hz) using NumPy for zero-allocation updates.
         """
         if not self.is_logging: return
 
@@ -1556,18 +1535,19 @@ class VentilatorApp(QMainWindow):
         for _ in range(count_to_pop):
             if self.render_queue:
                 # -- A. HAS DATA --
-                # Pop (Pressure, Flow, MarkerID)
                 p, f, m_id = self.render_queue.popleft()
 
-                self.pressure_data.append(p)
-                self.flow_data.append(f)
+                # Optimized NumPy Roll (Shift left, append new at end)
+                self.pressure_data[:-1] = self.pressure_data[1:]
+                self.pressure_data[-1] = p
 
-                # If this point has a Marker ID attached, spawn the marker now
+                self.flow_data[:-1] = self.flow_data[1:]
+                self.flow_data[-1] = f
+
                 if m_id:
                     self.p_markers.add_marker(m_id, y_offset=10)
                     self.f_markers.add_marker(m_id, y_offset=10)
 
-                # Synchronize Markers
                 self.p_markers.move_all(-0.02)
                 self.f_markers.move_all(-0.02)
 
@@ -1577,10 +1557,12 @@ class VentilatorApp(QMainWindow):
                     self.is_in_silence = False
                     self.update_status("RECORDING", "#00ff00")
             else:
-                # -- B. STARVATION (Real Disconnect / Empty) --
-                # If we run out despite the buffer, it's a real gap.
-                self.pressure_data.append(float('nan'))
-                self.flow_data.append(float('nan'))
+                # -- B. STARVATION --
+                self.pressure_data[:-1] = self.pressure_data[1:]
+                self.pressure_data[-1] = np.nan
+
+                self.flow_data[:-1] = self.flow_data[1:]
+                self.flow_data[-1] = np.nan
 
                 self.p_markers.move_all(-0.02)
                 self.f_markers.move_all(-0.02)
@@ -1588,8 +1570,9 @@ class VentilatorApp(QMainWindow):
 
         # 3. REFRESH GRAPH
         if did_update:
-            self.p_curve.setData(self.x_axis_data, list(self.pressure_data))
-            self.f_curve.setData(self.x_axis_data, list(self.flow_data))
+            # Pass numpy arrays directly - ZERO list allocations!
+            self.p_curve.setData(self.x_axis_data, self.pressure_data)
+            self.f_curve.setData(self.x_axis_data, self.flow_data)
 
             # Check for prolonged silence (Alarm)
             if self.render_queue:
@@ -1599,7 +1582,6 @@ class VentilatorApp(QMainWindow):
                 if not self.is_in_silence:
                     self.is_in_silence = True
                     self.update_status("SIGNAL LOST", "#ff0000")
-                    # Optional: Re-enter buffering state on reconnect
                     self.is_buffering = True
                     self.buffer_start_time = None
 
@@ -1645,8 +1627,6 @@ if __name__ == "__main__":
     def exception_hook(exctype, value, tb):
         error_msg = "".join(traceback.format_exception(exctype, value, tb))
         try:
-            # Attempt to write to the new log location if possible
-            # We construct the path manually here since 'window' might not be initialized
             log_path = Path.home() / "Desktop" / "Syncron-E Data" / "error_log.txt"
             with open(log_path, "a") as f:
                 f.write(f"\n[GUI CRASH {datetime.now()}]\n{error_msg}\n")
