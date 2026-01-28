@@ -102,17 +102,11 @@ jobs:
           # A. Generate Required PNGs from high-res source
           # Using 'ahclogo_transp_notxt_square.png' for clear, transparent icons
           
-          # Square 44x44 Logo
           magick "ahclogo_transp_notxt_square.png" -resize 44x44 "$assetsDir\Square44x44Logo.png"
-          
-          # Square 150x150 Logo
           magick "ahclogo_transp_notxt_square.png" -resize 150x150 "$assetsDir\Square150x150Logo.png"
-          
-          # Store Logo (50x50)
           magick "ahclogo_transp_notxt_square.png" -resize 50x50 "$assetsDir\StoreLogo.png"
-          
-          # Splash Screen (Reusing 150x150)
-          Copy-Item "$assetsDir\Square150x150Logo.png" "$assetsDir\SplashScreen.png"
+          magick "ahclogo_transp_notxt_square.png" -resize 150x150 "$assetsDir\SplashScreen.png"
+          magick "ahclogo_transp_notxt_square.png" -resize 256x256 "$assetsDir\Square44x44Logo.targetsize-256_altform-unplated.png"
 
           # B. Generate AppxManifest.xml
           # Note: Using ${{ env.APP_VERSION }} for the Identity Version
