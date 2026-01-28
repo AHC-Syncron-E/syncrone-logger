@@ -57,6 +57,10 @@ jobs:
             --enable-plugin=pyside6 `
             --include-module=PySide6.QtOpenGL `
             --include-module=PySide6.QtOpenGLWidgets `
+            --noinclude-pytest-mode=nofollow `
+            --noinclude-unittest-mode=nofollow `
+            --noinclude-setuptools-mode=nofollow `
+            --noinclude-IPython-mode=nofollow `
             --windows-icon-from-ico=icon.ico `
             --windows-console-mode=disable `
             --output-dir=build `
