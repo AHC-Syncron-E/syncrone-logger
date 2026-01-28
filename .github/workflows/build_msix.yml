@@ -92,21 +92,33 @@ jobs:
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: sha256
 
-      # --- 4. Prepare MSIX Assets (Manifest & Images) ---
       - name: Generate Manifest and Assets
         run: |
           $payloadDir = "payload"
           $assetsDir = "$payloadDir\Assets"
           New-Item -ItemType Directory -Force -Path $assetsDir
 
-          # A. Generate Required PNGs from high-res source
-          # Using 'ahclogo_transp_notxt_square.png' for clear, transparent icons
+          # A. Generate Required PNGs
+          # Source: ahclogo_transp_notxt_square.png
           
-          magick "ahclogo_transp_notxt_square.png" -resize 44x44 "$assetsDir\Square44x44Logo.png"
+          # 1. Base Manifest Assets (The anchors)
+          magick "ahclogo_transp_notxt_square.png" -resize 44x44   "$assetsDir\Square44x44Logo.png"
           magick "ahclogo_transp_notxt_square.png" -resize 150x150 "$assetsDir\Square150x150Logo.png"
-          magick "ahclogo_transp_notxt_square.png" -resize 50x50 "$assetsDir\StoreLogo.png"
+          magick "ahclogo_transp_notxt_square.png" -resize 50x50   "$assetsDir\StoreLogo.png"
           magick "ahclogo_transp_notxt_square.png" -resize 150x150 "$assetsDir\SplashScreen.png"
-          magick "ahclogo_transp_notxt_square.png" -resize 256x256 "$assetsDir\Square44x44Logo.targetsize-256_altform-unplated.png"
+
+          # 2. Generate Target Sizes for Taskbar (16, 24, 32, 48, 256)
+          # We generate BOTH the standard (plated lookup) and unplated (transparent) versions.
+          # This ensures Windows finds the resource "node" first, then switches to the unplated variant.
+          
+          $sizes = 16, 24, 32, 48, 256
+          foreach ($size in $sizes) {
+              # Standard (Anchor)
+              magick "ahclogo_transp_notxt_square.png" -resize "${size}x${size}" "$assetsDir\Square44x44Logo.targetsize-${size}.png"
+              
+              # Unplated (The one we actually want shown)
+              magick "ahclogo_transp_notxt_square.png" -resize "${size}x${size}" "$assetsDir\Square44x44Logo.targetsize-${size}_altform-unplated.png"
+          }
 
           # B. Generate AppxManifest.xml
           # Note: Using ${{ env.APP_VERSION }} for the Identity Version
