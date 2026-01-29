@@ -32,8 +32,15 @@ class TestSnapshotWorker:
 
         # Insert "Future" Data so it is definitely picked up by the "Last 1 Hour" query
         conn = sqlite3.connect(str(db_path))
+
+        # 1. Insert Waveform Data
         conn.execute("INSERT INTO waveforms (timestamp, raw_data) VALUES (?, ?)",
                      ("9999-12-31T23:59:59", "FUTURE_WAVE_LINE\n"))
+
+        # 2. FIX: Insert Settings Data (Critical for file creation)
+        conn.execute("INSERT INTO settings (timestamp, raw_data) VALUES (?, ?)",
+                     ("9999-12-31T23:59:59", "FUTURE_SETTINGS_LINE\n"))
+
         conn.commit()
         conn.close()
 
@@ -45,11 +52,14 @@ class TestSnapshotWorker:
         wf_file = output_folder / "LAST_1HOUR_WAVEFORMS.txt"
         st_file = output_folder / "LAST_1HOUR_SETTINGS.txt"
 
-        assert wf_file.exists()
-        assert st_file.exists()
+        assert wf_file.exists(), "Waveform file was not created"
+        assert st_file.exists(), "Settings file was not created (Table data missing?)"
 
-        content = wf_file.read_text(encoding='utf-8')
-        assert "FUTURE_WAVE_LINE" in content
+        content_wf = wf_file.read_text(encoding='utf-8')
+        assert "FUTURE_WAVE_LINE" in content_wf
+
+        content_st = st_file.read_text(encoding='utf-8')
+        assert "FUTURE_SETTINGS_LINE" in content_st
 
     def test_atomic_write_safety(self, setup_environment, mocker):
         """
