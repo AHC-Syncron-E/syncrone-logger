@@ -6,9 +6,13 @@ on:
   pull_request:
     branches: [ "main" ]
 
+permissions:
+  contents: read
+  checks: write
+
 jobs:
   test-windows:
-    name: Unit Tests (Windows)
+    name: Windows Test Suite
     runs-on: windows-latest
 
     steps:
@@ -24,18 +28,32 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install -r requirements.txt
-          # Install testing tools
-          pip install pytest pytest-qt pytest-cov
 
-      - name: Run Tests
+      - name: Run Tests & Generate Reports
         env:
-          # "offscreen" prevents the GUI from trying to open a real window on the CI server
           QT_QPA_PLATFORM: offscreen
         run: |
-          # We ignore the 'wandb' import error if it happens, 
-          # but since requirements.txt likely installs it, this environment will match production.
-          pytest tests/ --cov=main --cov-report=term --cov-report=xml
+          # 1. --html=report.html: Generates a visual test result page
+          # 2. --cov-report=html: Generates a browseable folder of code coverage
+          pytest tests/ `
+            --cov=main `
+            --cov-report=html:coverage_html_report `
+            --cov-report=term `
+            --html=test_results_report.html `
+            --self-contained-html
 
-      # Optional: Upload coverage if you have a Codecov account
-      # - name: Upload Coverage
-      #   uses: codecov/codecov-action@v4
+      # --- Upload Artifacts for Viewing ---
+
+      - name: Upload Test Result HTML
+        if: always() # Upload even if tests fail so we can see WHY
+        uses: actions/upload-artifact@v4
+        with:
+          name: Test-Results-Report
+          path: test_results_report.html
+
+      - name: Upload Coverage Report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Coverage-Report
+          path: coverage_html_report/
