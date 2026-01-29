@@ -1,5 +1,6 @@
 import sys
 import time
+import os
 import serial
 import serial.tools.list_ports
 import threading
@@ -7,9 +8,9 @@ from pathlib import Path
 from datetime import datetime
 
 # GUI Components
-from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
-                               QHBoxLayout, QPushButton, QLabel, QFrame, QMessageBox, 
-                               QComboBox, QPlainTextEdit, QGroupBox, QSplitter)
+from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
+                               QHBoxLayout, QPushButton, QLabel, QFrame, QMessageBox,
+                               QComboBox, QPlainTextEdit, QGroupBox, QGridLayout)
 from PySide6.QtCore import Qt, QThread, Signal, Slot
 from PySide6.QtGui import QFont, QIcon, QColor, QTextCursor
 
@@ -39,53 +40,69 @@ REAL_PB980_PAYLOAD = (
     b'      ,      ,      ,      ,\x03\r'
 )
 
+
 # --- HELPER LOGIC ---
+
+def resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for Nuitka/MSIX """
+    try:
+        # Check if we are running as a compiled Nuitka/PyInstaller exe
+        if getattr(sys, 'frozen', False):
+            # In Nuitka standalone, resources are next to the executable
+            base_path = os.path.dirname(sys.executable)
+        else:
+            # In dev mode, resources are next to the script
+            base_path = os.path.dirname(os.path.abspath(__file__))
+    except Exception:
+        base_path = os.path.abspath(".")
+
+    return os.path.join(base_path, relative_path)
+
+
 def get_breaths(filepath):
     p = Path(filepath)
     if not p.exists():
-        return []
+        # Raise generic error to be caught by UI loader
+        raise FileNotFoundError(f"Path does not exist: {p}")
 
     breaths = []
     current_lines = []
     data_line_count = 0
     in_breath = False
 
-    try:
-        with open(p, 'r', encoding='utf-8') as f:
-            for line in f:
-                clean = line.strip()
-                if not clean: continue
+    with open(p, 'r', encoding='utf-8') as f:
+        for line in f:
+            clean = line.strip()
+            if not clean: continue
 
-                if clean.startswith("BS"):
-                    in_breath = True
-                    current_lines = [line]
-                    data_line_count = 0
-                elif clean.startswith("BE"):
-                    if in_breath:
-                        current_lines.append(line)
-                        duration = data_line_count * SAMPLE_RATE_MS
-                        breaths.append({
-                            'payload': "".join(current_lines).encode('latin-1'),
-                            'duration': duration,
-                            'header': current_lines[0].strip()
-                        })
-                        in_breath = False
-                        current_lines = []
-                elif in_breath:
+            if clean.startswith("BS"):
+                in_breath = True
+                current_lines = [line]
+                data_line_count = 0
+            elif clean.startswith("BE"):
+                if in_breath:
                     current_lines.append(line)
-                    data_line_count += 1
-    except Exception as e:
-        print(f"Error parsing file: {e}")
-        return []
-    
+                    duration = data_line_count * SAMPLE_RATE_MS
+                    breaths.append({
+                        'payload': "".join(current_lines).encode('latin-1'),
+                        'duration': duration,
+                        'header': current_lines[0].strip()
+                    })
+                    in_breath = False
+                    current_lines = []
+            elif in_breath:
+                current_lines.append(line)
+                data_line_count += 1
+
     return breaths
+
 
 # --- WORKER THREADS ---
 
 class WaveformWorker(QThread):
     sig_log = Signal(str, str)  # (Message, Color)
     sig_error = Signal(str)
-    
+
     def __init__(self, port, breaths):
         super().__init__()
         self.port_name = port
@@ -108,7 +125,7 @@ class WaveformWorker(QThread):
         try:
             while self.is_running:
                 breath = self.breaths[index]
-                
+
                 # Write Data
                 if self.ser and self.ser.is_open:
                     self.ser.write(breath['payload'])
@@ -117,11 +134,10 @@ class WaveformWorker(QThread):
                 # Calculate Drift
                 now = time.monotonic()
                 current_lag = now - next_wake_time
-                
-                # Log only every 5th breath to reduce noise
-                if index % 5 == 0:
-                    msg = f"Sent {breath['header']} | Lag: {current_lag*1000:.1f}ms"
-                    self.sig_log.emit(msg, "#aaaaaa")
+
+                # Log EVERY breath (Sequence checking)
+                msg = f"Sent {breath['header']} | Lag: {current_lag * 1000:.1f}ms"
+                self.sig_log.emit(msg, "#aaaaaa")
 
                 # Schedule
                 next_wake_time += breath['duration']
@@ -134,7 +150,7 @@ class WaveformWorker(QThread):
                     next_wake_time = time.monotonic()
 
                 index = (index + 1) % total_breaths
-                
+
         except Exception as e:
             self.sig_error.emit(f"Waveform Loop Error: {e}")
         finally:
@@ -176,10 +192,10 @@ class SettingsWorker(QThread):
                 if self.ser.in_waiting > 0:
                     chunk = self.ser.read(self.ser.in_waiting)
                     buffer += chunk
-                    
+
                     if b'\r' in buffer:
                         parts = buffer.split(b'\r')
-                        buffer = parts[-1] # Keep tail
+                        buffer = parts[-1]  # Keep tail
                         commands = parts[:-1]
 
                         for cmd in commands:
@@ -274,7 +290,7 @@ class SimulatorApp(QMainWindow):
         self.lbl_status = QLabel("Status: Idle")
         self.lbl_status.setStyleSheet("font-weight: bold; color: #888; margin-top: 5px;")
         self.lbl_breaths = QLabel("Breaths Loaded: 0")
-        
+
         info_layout = QHBoxLayout()
         info_layout.addWidget(self.lbl_status)
         info_layout.addStretch()
@@ -291,24 +307,28 @@ class SimulatorApp(QMainWindow):
         layout.addWidget(QLabel("Simulation Log:"))
         self.log_display = QPlainTextEdit()
         self.log_display.setReadOnly(True)
-        self.log_display.setMaximumBlockCount(1000) # Keep memory low
+        self.log_display.setMaximumBlockCount(1000)  # Keep memory low
         layout.addWidget(self.log_display)
 
     def load_data(self):
-        self.breaths_data = get_breaths(LOG_FILE)
-        self.lbl_breaths.setText(f"Breaths Loaded: {len(self.breaths_data)}")
-        if not self.breaths_data:
-            self.log_msg(f"Error: Could not find or parse {LOG_FILE}", "#ff0000")
+        # Locate the bundled file, whether in dev mode or MSIX mode
+        file_path = resource_path(LOG_FILE)
+
+        try:
+            self.breaths_data = get_breaths(file_path)
+            self.lbl_breaths.setText(f"Breaths Loaded: {len(self.breaths_data)}")
+        except Exception as e:
+            self.log_msg(f"Error: {e}", "#ff0000")
+            self.log_msg(f"Searched at: {file_path}", "#ff0000")
             self.btn_toggle.setEnabled(False)
 
     def refresh_ports(self):
         self.combo_wave.clear()
         self.combo_sett.clear()
-        
+
         ports = serial.tools.list_ports.comports()
-        # Filter for known FTDI/Prolific chips if possible, else show all but mark them
         valid_ports = []
-        
+
         for p in ports:
             # Check VID if available
             is_supported = (p.vid in SUPPORTED_VIDS) if p.vid else False
@@ -317,13 +337,13 @@ class SimulatorApp(QMainWindow):
                 name += f" (VID: {hex(p.vid)})"
             elif p.description:
                 name += f" - {p.description}"
-                
+
             item_data = p.device
-            
+
             # Add to lists
             self.combo_wave.addItem(name, item_data)
             self.combo_sett.addItem(name, item_data)
-            
+
             if is_supported:
                 valid_ports.append(item_data)
 
@@ -331,13 +351,13 @@ class SimulatorApp(QMainWindow):
         if len(valid_ports) >= 2:
             # Sort to ensure consistent ordering (e.g. USB0, USB1)
             valid_ports.sort()
-            
+
             index_wave = self.combo_wave.findData(valid_ports[0])
             self.combo_wave.setCurrentIndex(index_wave)
-            
+
             index_sett = self.combo_sett.findData(valid_ports[1])
             self.combo_sett.setCurrentIndex(index_sett)
-            
+
             self.log_msg(f"Auto-selected supported ports.", "#00ff00")
         else:
             self.log_msg(f"Found {len(valid_ports)} supported cables. Please select manually.", "#ffa500")
@@ -383,12 +403,12 @@ class SimulatorApp(QMainWindow):
 
     def stop_simulation(self):
         self.is_simulating = False
-        
+
         # Stop Workers
         if self.wave_worker:
             self.wave_worker.stop()
             self.wave_worker = None
-        
+
         if self.sett_worker:
             self.sett_worker.stop()
             self.sett_worker = None
@@ -415,8 +435,6 @@ class SimulatorApp(QMainWindow):
         html = f'<span style="color: #666;">[{ts}]</span> <span style="color: {color};">{msg}</span>'
         self.log_display.appendHtml(html)
 
-# --- ENTRY POINT ---
-from PySide6.QtWidgets import QGridLayout # Added missing import
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
