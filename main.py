@@ -14,7 +14,13 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from collections import deque
 
-# --- FIX: NUMPY IMPORT ---
+try:
+    import psutil
+    import wandb
+    HAS_TELEMETRY_LIBS = True
+except ImportError:
+    HAS_TELEMETRY_LIBS = False
+
 import numpy as np
 
 # Serial Communication
@@ -38,6 +44,96 @@ import pyqtgraph as pg
 APP_VERSION = "1.2.3"  # Bumped version
 DEBUG_PIN = "REDACTED_PIN"  # PIN required to access internal debugger
 
+
+class TelemetryManager(QThread):
+    """
+    Monitors system resources and logs them to Weights & Biases.
+    Runs in a separate thread to prevent blocking the UI or Serial comms.
+    """
+
+    def __init__(self, project_name="REDACTED_PROJECT"):
+        super().__init__()
+        self.project_name = project_name
+        self.is_active = False  # Is WandB initialized?
+        self.is_running = False  # Is the thread loop running?
+        self.api_key = None
+
+    def setup(self, api_key):
+        """Authenticates and initializes the WandB run."""
+        if not HAS_TELEMETRY_LIBS:
+            return False
+
+        if self.is_active:
+            return True
+
+        try:
+            self.api_key = api_key
+            wandb.login(key=self.api_key)
+
+            # Create a unique run name: e.g., "sess_0128_1630_username"
+            run_name = f"sess_{datetime.now().strftime('%m%d_%H%M')}_{os.getlogin()}"
+
+            wandb.init(
+                project=self.project_name,
+                name=run_name,
+                config={
+                    "version": APP_VERSION,
+                    "platform": sys.platform
+                },
+                # 'thread' mode is safer for GUI apps than 'process'
+                settings=wandb.Settings(start_method="thread")
+            )
+            self.is_active = True
+            return True
+        except Exception as e:
+            print(f"WandB Init Error: {e}")
+            return False
+
+    def run(self):
+        """The main monitoring loop."""
+        if not HAS_TELEMETRY_LIBS or not self.is_active: return
+
+        process = psutil.Process(os.getpid())
+
+        while self.is_running:
+            try:
+                # 1. Collect Metrics
+                mem = process.memory_info()
+                metrics = {
+                    "app_rss_mb": mem.rss / (1024 * 1024),  # Resident Set Size (Physical RAM)
+                    "app_vms_mb": mem.vms / (1024 * 1024),  # Virtual Memory Size
+                    "app_cpu_percent": process.cpu_percent(interval=None),
+                    "app_threads": process.num_threads(),
+                    "system_cpu_percent": psutil.cpu_percent(),
+                    "system_ram_percent": psutil.virtual_memory().percent
+                }
+
+                # 2. Push to WandB
+                wandb.log(metrics)
+
+                # 3. Sleep (Sample every 10 seconds)
+                for _ in range(10):
+                    if not self.is_running: break
+                    time.sleep(1)
+
+            except Exception as e:
+                # If network fails, just wait and retry. Don't crash.
+                time.sleep(5)
+
+    def start_logging(self):
+        if self.is_active:
+            self.is_running = True
+            self.start()
+
+    def stop_logging(self):
+        self.is_running = False
+        self.wait()
+        if self.is_active:
+            try:
+                wandb.finish()
+            except:
+                pass
+            self.is_active = False
 
 # -----------------------------------------------------------------------------
 # 0. HELPER UI CLASSES
@@ -196,6 +292,24 @@ class AboutDialog(QDialog):
         lbl_info.setAlignment(Qt.AlignCenter)
         lbl_info.setStyleSheet("color: #ddd;")
 
+        self.btn_telemetry = QPushButton("Enable WandB Telemetry")
+        self.btn_telemetry.setFixedHeight(40)
+        self.btn_telemetry.setStyleSheet(
+            "background-color: #333; color: #aaa; border: 1px solid #555; border-radius: 4px;")
+
+        # Check state to update button appearance
+        if not HAS_TELEMETRY_LIBS:
+            self.btn_telemetry.setText("Telemetry Unavailable (Missing Libs)")
+            self.btn_telemetry.setEnabled(False)
+        elif self.parent_window.telemetry.is_active:
+            self.btn_telemetry.setText("Telemetry ACTIVE ✓")
+            self.btn_telemetry.setStyleSheet("background-color: #004400; color: #00ff00; border: 1px solid #00ff00;")
+            self.btn_telemetry.setEnabled(False)
+        else:
+            self.btn_telemetry.clicked.connect(self.activate_telemetry)
+
+        layout.addWidget(self.btn_telemetry)  # Add above Debugger button
+
         # Button
         self.btn_debug = QPushButton("Launch Internal Debugger")
         self.btn_debug.setFixedHeight(40)
@@ -214,6 +328,29 @@ class AboutDialog(QDialog):
         layout.addStretch()
         layout.addWidget(self.btn_debug)
         layout.addWidget(QDialogButtonBox(QDialogButtonBox.Ok, accepted=self.accept))
+
+    def activate_telemetry(self):
+        # 1. Security Check
+        text, ok = QInputDialog.getText(self, "Admin Access", "Enter PIN:", QLineEdit.Password)
+        if not ok: return
+        if text != DEBUG_PIN:  # REDACTED_PIN
+            QMessageBox.warning(self, "Access Denied", "Incorrect PIN.")
+            return
+
+        # 2. Get API Key
+        key, ok = QInputDialog.getText(self, "WandB Setup", "Enter WandB API Key:", QLineEdit.Password)
+        if ok and key:
+            self.btn_telemetry.setText("Connecting...")
+            self.btn_telemetry.repaint()
+
+            # 3. Init Telemetry
+            if self.parent_window.telemetry.setup(key):
+                self.parent_window.telemetry.start_logging()
+                self.accept()
+                QMessageBox.information(self.parent_window, "Connected", "Telemetry is now streaming to WandB.")
+            else:
+                self.btn_telemetry.setText("Enable WandB Telemetry")
+                QMessageBox.critical(self, "Error", "Connection Failed.\nCheck internet or API key.")
 
     def launch_shell(self):
         text, ok = QInputDialog.getText(self, "Restricted Access",
@@ -923,6 +1060,9 @@ class VentilatorApp(QMainWindow):
         if self.config_corrupt_msg:
             QTimer.singleShot(500, lambda: QMessageBox.warning(self, "Config Reset", self.config_corrupt_msg))
 
+        # Initialize Telemetry Manager (Starts in dormant state)
+        self.telemetry = TelemetryManager()
+
     def prevent_sleep(self):
         try:
             ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | 0x00000001 | 0x00000002)
@@ -1277,6 +1417,9 @@ class VentilatorApp(QMainWindow):
         dlg.exec()
 
     def closeEvent(self, event: QCloseEvent):
+        # Ensure thread stops cleanly on exit
+        if self.telemetry.isRunning():
+            self.telemetry.stop_logging()
         if self.is_logging or self.is_locked:
             msg = "Recording in progress!" if self.is_logging else "App is LOCKED."
             QMessageBox.warning(self, "Cannot Close", f"{msg}\nPlease stop recording/unlock first.")
