@@ -1,0 +1,193 @@
+name: Build Simulator MSIX
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+env:
+  # CRITICAL: This MUST match the "Subject" of your Azure Signing Certificate exactly.
+  # It should be identical to the one in your main build_msix.yml
+  PUBLISHER_NAME: "CN=Autonomous Healthcare Inc., O=Autonomous Healthcare Inc., L=Santa Clara, S=California, C=US"
+
+  # Distinct App Name to allow side-by-side installation with the main app
+  APP_NAME: "SyncronESimulator"
+
+  # Base version (Major.Minor.Patch). The 4th digit will be the GitHub Run Number.
+  VERSION_PREFIX: "1.0.0"
+
+jobs:
+  build-simulator-msix:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      # --- 1. Setup Environment ---
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+
+      - name: Install Dependencies
+        run: |
+          pip install nuitka zstandard
+          # Simulator only needs PySide6 and PySerial (No NumPy/PyQtGraph needed)
+          pip install pyside6 pyserial
+
+      # --- 2. Set Dynamic Version ---
+      # Combines "1.0.0" + "RunNumber" (e.g. 45) -> "1.0.0.45"
+      - name: Set App Version
+        run: |
+          $ver = "${{ env.VERSION_PREFIX }}.${{ github.run_number }}"
+          echo "APP_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "Building Version: $ver"
+
+      # --- 3. Compile with Nuitka ---
+      - name: Compile Standalone
+        run: |
+          python -m nuitka --standalone `
+            --assume-yes-for-downloads `
+            --enable-plugin=pyside6 `
+            --noinclude-pytest-mode=nofollow `
+            --noinclude-unittest-mode=nofollow `
+            --noinclude-setuptools-mode=nofollow `
+            --noinclude-IPython-mode=nofollow `
+            --windows-icon-from-ico=icon.ico `
+            --windows-console-mode=disable `
+            --output-dir=build `
+            --company-name="Autonomous Healthcare Inc." `
+            --product-name="PB980 Simulator" `
+            --file-version="${{ env.APP_VERSION }}" `
+            --product-version="${{ env.APP_VERSION }}" `
+            --include-data-file=logged_waveforms.txt=logged_waveforms.txt `
+            pb980_simulator_gui.py
+
+          # Rename the dist folder to something clean for packaging
+          Move-Item -Path "build\pb980_simulator_gui.dist" -Destination "payload"
+
+      # --- 4. Sign the Inner Executables (EXE/DLL) ---
+      - name: Sign Binaries (EXE, DLL, PYD)
+        uses: azure/artifact-signing-action@v1
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_CODE_SIGNING_NAME }}
+          certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE_NAME }}
+          files-folder: payload
+          files-folder-filter: "*.exe,*.dll,*.pyd"
+          files-folder-recurse: true
+          file-digest: sha256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: sha256
+
+      # --- 5. Generate Manifest and Assets ---
+      - name: Generate Manifest and Assets
+        run: |
+          $payloadDir = "payload"
+          $assetsDir = "$payloadDir\Assets"
+          New-Item -ItemType Directory -Force -Path $assetsDir
+
+          # A. Generate Required PNGs (Re-using the same source image as main app)
+          # Source: ahclogo_transp_notxt_square.png MUST exist in repo root
+          
+          # 1. Base Manifest Assets (The anchors)
+          magick "ahclogo_transp_notxt_square.png" -resize 44x44   "$assetsDir\Square44x44Logo.png"
+          magick "ahclogo_transp_notxt_square.png" -resize 150x150 "$assetsDir\Square150x150Logo.png"
+          magick "ahclogo_transp_notxt_square.png" -resize 50x50   "$assetsDir\StoreLogo.png"
+          magick "ahclogo_transp_notxt_square.png" -resize 150x150 "$assetsDir\SplashScreen.png"
+
+          # 2. Generate Target Sizes for Taskbar (16, 24, 32, 48, 256)
+          # We generate BOTH the standard (plated lookup) and unplated (transparent) versions.
+          $sizes = 16, 24, 32, 48, 256
+          foreach ($size in $sizes) {
+              # Standard (Anchor)
+              magick "ahclogo_transp_notxt_square.png" -resize "${size}x${size}" "$assetsDir\Square44x44Logo.targetsize-${size}.png"
+              
+              # Unplated (The one we actually want shown)
+              magick "ahclogo_transp_notxt_square.png" -resize "${size}x${size}" "$assetsDir\Square44x44Logo.targetsize-${size}_altform-unplated.png"
+          }
+
+          # B. Generate AppxManifest.xml for SIMULATOR
+          # Note: We use a different Identity Name so it installs separately from the main app.
+          # Executable name matches the Nuitka source script name (pb980_simulator_gui.exe)
+          $manifestContent = @"
+          <?xml version="1.0" encoding="utf-8"?>
+          <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10" 
+                   xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10" 
+                   xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities">
+            <Identity Name="${{ env.APP_NAME }}" 
+                      Publisher="${{ env.PUBLISHER_NAME }}" 
+                      Version="${{ env.APP_VERSION }}" 
+                      ProcessorArchitecture="x64" />
+            <Properties>
+              <DisplayName>PB980 Simulator</DisplayName>
+              <PublisherDisplayName>Autonomous Healthcare Inc.</PublisherDisplayName>
+              <Logo>Assets\StoreLogo.png</Logo>
+            </Properties>
+            <Resources>
+              <Resource Language="en-us" />
+            </Resources>
+            <Dependencies>
+              <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.22621.0" />
+            </Dependencies>
+            <Capabilities>
+              <rescap:Capability Name="runFullTrust" />
+            </Capabilities>
+            <Applications>
+              <Application Id="SyncronESimulatorApp" Executable="pb980_simulator_gui.exe" EntryPoint="Windows.FullTrustApplication">
+                <uap:VisualElements 
+                  DisplayName="PB980 Simulator" 
+                  Description="Hardware Simulator for PB980 Ventilator" 
+                  BackgroundColor="transparent" 
+                  Square150x150Logo="Assets\Square150x150Logo.png" 
+                  Square44x44Logo="Assets\Square44x44Logo.png">
+                  <uap:SplashScreen Image="Assets\SplashScreen.png" />
+                </uap:VisualElements>
+              </Application>
+            </Applications>
+          </Package>
+          "@
+          Set-Content -Path "$payloadDir\AppxManifest.xml" -Value $manifestContent
+
+      # --- 6. Pack MSIX ---
+      - name: Create MSIX Package
+        run: |
+          $makeappx = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\makeappx.exe"
+          if (-not (Test-Path $makeappx)) {
+              $makeappx = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\makeappx.exe" | Select-Object -First 1
+          }
+          
+          # Pack into a distinct filename
+          & $makeappx pack /d payload /p "PB980_Simulator_${{ env.APP_VERSION }}.msix" /v
+
+      # --- 7. Sign the MSIX ---
+      - name: Sign MSIX Package
+        uses: azure/artifact-signing-action@v1
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_ENDPOINT }}
+          signing-account-name: ${{ secrets.AZURE_CODE_SIGNING_NAME }}
+          certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE_NAME }}
+          files-folder: .
+          # Matches the new filename format
+          files-folder-filter: "PB980_Simulator_*.msix"
+          file-digest: sha256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: sha256
+
+      # --- 8. Upload Artifact ---
+      - name: Upload Simulator MSIX
+        uses: actions/upload-artifact@v4
+        with:
+          name: PB980-Simulator-MSIX
+          path: "PB980_Simulator_*.msix"
