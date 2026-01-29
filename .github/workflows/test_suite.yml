@@ -1,0 +1,41 @@
+name: Automated Test Suite
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  test-windows:
+    name: Unit Tests (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+
+      - name: Install Dependencies
+        run: |
+          pip install -r requirements.txt
+          # Install testing tools
+          pip install pytest pytest-qt pytest-cov
+
+      - name: Run Tests
+        env:
+          # "offscreen" prevents the GUI from trying to open a real window on the CI server
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          # We ignore the 'wandb' import error if it happens, 
+          # but since requirements.txt likely installs it, this environment will match production.
+          pytest tests/ --cov=main --cov-report=term --cov-report=xml
+
+      # Optional: Upload coverage if you have a Codecov account
+      # - name: Upload Coverage
+      #   uses: codecov/codecov-action@v4
