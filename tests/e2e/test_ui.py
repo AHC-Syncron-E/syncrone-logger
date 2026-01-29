@@ -17,7 +17,7 @@ class TestUserInterface:
     @pytest.fixture
     def ui_app(self, qapp, qtbot, mocker):
         # 1. Create a BLANK instance of the App
-        # We use __new__ to skip __init__ entirely.
+        # CRITICAL: We use __new__ to skip __init__ entirely.
         # This guarantees NO crashing code (timers, icons, styles) ever runs.
         app = main.VentilatorApp.__new__(main.VentilatorApp)
 
@@ -48,6 +48,7 @@ class TestUserInterface:
         app.combo_stop = QComboBox()
         app.combo_stop.addItem("Test Option", {"type": "manual", "value": 0})
 
+        # Mock other labels to prevent AttributeErrors in logic
         app.lbl_started = QLabel()
         app.lbl_duration = QLabel()
         app.lbl_breaths = QLabel()
@@ -62,7 +63,6 @@ class TestUserInterface:
         # Mock Plots (Heavy objects)
         app.p_plot = MagicMock()
         app.f_plot = MagicMock()
-        # Mock ViewBox for the lock logic
         app.p_plot.getViewBox.return_value = MagicMock()
         app.f_plot.getViewBox.return_value = MagicMock()
 
@@ -73,7 +73,7 @@ class TestUserInterface:
 
         # 7. Mock System Calls that methods might use
         mocker.patch('main.VentilatorApp.check_disk_space', return_value=1_000_000_000_000)
-        # We also need to mock the worker constructor since toggle_logging tries to make a new one
+        # Mock worker constructors
         mocker.patch('main.VentilatorWorker', return_value=MagicMock())
         mocker.patch('main.SnapshotWorker', return_value=MagicMock())
 
@@ -84,11 +84,9 @@ class TestUserInterface:
 
     def test_smoke_launch(self, ui_app):
         """Verify our manual setup matches expected initial state."""
-        # Note: Window title won't be set because we skipped __init__,
-        # but we check the logic flags.
         assert ui_app.is_logging is False
         assert ui_app.is_locked is False
-        assert ui_app.btn_action.isEnabled() is True  # Enabled by default QPushBtn
+        assert ui_app.btn_action.isEnabled() is True
 
         # Run check_input once to set correct button state
         ui_app.check_input()
@@ -96,49 +94,36 @@ class TestUserInterface:
 
     def test_input_validation_workflow(self, ui_app, qtbot):
         """Verify that typing a Patient ID enables the Start button."""
-        # 1. Initial State
         ui_app.check_input()
         assert ui_app.btn_action.isEnabled() is False
 
-        # 2. Simulate typing
         qtbot.keyClicks(ui_app.input_id, "PATIENT_XYZ")
 
-        # 3. Verify Enabled
         assert ui_app.btn_action.isEnabled() is True
         assert ui_app.input_id.text() == "PATIENT_XYZ"
 
-        # 4. Clear
         ui_app.input_id.clear()
         assert ui_app.btn_action.isEnabled() is False
 
     def test_start_recording_workflow(self, ui_app, qtbot):
         """Verify clicking 'Start' locks UI and starts worker."""
-        # 1. Setup
         ui_app.input_id.setText("TEST_CASE_01")
 
-        # 2. Click Start
         qtbot.mouseClick(ui_app.btn_action, Qt.LeftButton)
 
-        # 3. Verify Logic
         assert ui_app.is_logging is True
         assert ui_app.input_id.isEnabled() is False
         assert "STOP" in ui_app.btn_action.text()
 
-        # 4. Verify Backend Triggered
-        # toggle_logging creates a NEW worker instance and assigns it to self.worker
-        # We verify that the new worker (which is a Mock from our patch) had .start() called.
         ui_app.worker.start.assert_called_once()
 
     def test_stop_recording_workflow(self, ui_app, qtbot):
         """Verify clicking 'Stop' resets the UI."""
-        # 1. Start
         ui_app.input_id.setText("TEST_CASE_01")
         qtbot.mouseClick(ui_app.btn_action, Qt.LeftButton)
 
-        # 2. Stop
         qtbot.mouseClick(ui_app.btn_action, Qt.LeftButton)
 
-        # 3. Verify
         assert ui_app.is_logging is False
         assert ui_app.input_id.isEnabled() is True
         assert "START" in ui_app.btn_action.text()
@@ -147,12 +132,10 @@ class TestUserInterface:
 
     def test_lock_screen_logic(self, ui_app, qtbot):
         """Verify Lock/Unlock button logic."""
-        # Lock
         qtbot.mouseClick(ui_app.btn_lock, Qt.LeftButton)
         assert ui_app.is_locked is True
         assert ui_app.input_id.isEnabled() is False
 
-        # Unlock
         qtbot.mouseClick(ui_app.btn_lock, Qt.LeftButton)
         assert ui_app.is_locked is False
         assert ui_app.input_id.isEnabled() is True
