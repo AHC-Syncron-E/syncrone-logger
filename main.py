@@ -648,14 +648,11 @@ class VentilatorWorker(QThread):
         self.root_folder = Path.home() / "Desktop" / "Syncron-E Data"
 
         # FIX: Extract only Major.Minor for storage stability
-        # "1.2.3.45" -> "1.2"
-        # "1.2" -> "1.2"
         version_parts = APP_VERSION.split('.')
         storage_version = "1.0"  # Fallback
         if len(version_parts) >= 2:
             storage_version = f"{version_parts[0]}.{version_parts[1]}"
 
-        # This ensures v1.2.3.45 and v1.2.3.46 both use ".../v1.2"
         self.system_folder = self.root_folder / ".syncrone_system" / f"v{storage_version}"
 
         self.logs_folder = self.system_folder / "logs"
@@ -682,7 +679,10 @@ class VentilatorWorker(QThread):
         self.last_rotation_check = 0
         self.current_file_date = None
         self.SUPPORTED_DEVICES = [(0x0403, 0x6001), (0x067B, 0x23A3), (0x067B, 0x2303)]
+
+        # Kept for compatibility with initial detection logic
         self.waveform_pattern = re.compile(r"BS,\s*S:(\d+),")
+
         self.reconnect_timeout_seconds = 120
 
         # --- FIX: THROTTLE TRACKERS ---
@@ -768,10 +768,10 @@ class VentilatorWorker(QThread):
             pass
         self.port_a = None
         self.port_b = None
-        start_wait = time.monotonic()
+        self.start_wait = time.monotonic()
 
         while self.is_running:
-            elapsed = time.monotonic() - start_wait
+            elapsed = time.monotonic() - self.start_wait
             remaining = self.reconnect_timeout_seconds - elapsed
             if remaining <= 0: return False
             self.sig_status_update.emit(f"RECONNECTING... ({int(remaining)}s)", "#ffa500")
@@ -933,54 +933,136 @@ class VentilatorWorker(QThread):
         self.db_manager.insert_setting(self.patient_id, data)
         self.process_settings_buffer(data)
 
+    # --- NEW STATIC PARSER (PURE LOGIC) ---
+    @staticmethod
+    def parse_incoming_chunk(current_buffer, new_chunk, max_size=8192):
+        """
+        Pure logic: Manages the buffer and extracts valid events.
+        """
+        # 1. Update Buffer
+        full_buffer = current_buffer + new_chunk
+        if len(full_buffer) > max_size:
+            return "", []  # Overflow protection
+
+        if '\n' not in full_buffer:
+            return full_buffer, []
+
+        # 2. Split into processable lines
+        lines = full_buffer.split('\n')
+        remaining_buffer = lines[-1]
+        complete_lines = lines[:-1]
+
+        events = []
+        # Pattern matching
+        breath_pattern = r"BS,\s*S:(\d+),"
+
+        for line in complete_lines:
+            clean = line.strip()
+            if not clean: continue
+
+            if clean.startswith("BS"):
+                match = re.search(breath_pattern, clean)
+                if match:
+                    events.append(('BREATH', match.group(1)))
+                continue
+
+            if clean.startswith("BE"):
+                continue
+
+            try:
+                parts = clean.split(',')
+                if len(parts) == 2:
+                    flow = float(parts[0])
+                    pressure = float(parts[1])
+                    events.append(('DATA', pressure, flow))
+            except ValueError:
+                pass
+
+        return remaining_buffer, events
+
     def process_waveform_buffer(self, new_chunk):
-        self.waveform_line_buffer += new_chunk
-        if len(self.waveform_line_buffer) > self.MAX_BUFFER_SIZE:
-            self.waveform_line_buffer = ""
-            return None
+        """
+        Orchestrator: Calls static parser and emits signals.
+        """
+        self.waveform_line_buffer, events = self.parse_incoming_chunk(
+            self.waveform_line_buffer,
+            new_chunk,
+            self.MAX_BUFFER_SIZE
+        )
+
         last_vals = None
-        if '\n' in self.waveform_line_buffer:
-            lines = self.waveform_line_buffer.split('\n')
-            for line in lines[:-1]:
-                clean = line.strip()
-                if not clean: continue
-                if clean.startswith("BS"):
-                    match = self.waveform_pattern.search(clean)
-                    if match: self.sig_breath_seq.emit(match.group(1))
-                    continue
-                if clean.startswith("BE"): continue
-                try:
-                    parts = clean.split(',')
-                    if len(parts) == 2:
-                        flow = float(parts[0])
-                        pressure = float(parts[1])
-                        self.sig_waveform_data.emit(pressure, flow)
-                        last_vals = (pressure, flow)
-                except ValueError:
-                    pass
-            self.waveform_line_buffer = lines[-1]
+
+        for event in events:
+            evt_type = event[0]
+
+            if evt_type == 'BREATH':
+                seq_num = event[1]
+                self.sig_breath_seq.emit(seq_num)
+
+            elif evt_type == 'DATA':
+                pressure, flow = event[1], event[2]
+                self.sig_waveform_data.emit(pressure, flow)
+                last_vals = (pressure, flow)
+
         return last_vals
 
+    @staticmethod
+    def parse_settings_chunk(current_buffer, new_chunk, max_size=8192):
+        """
+        Pure logic: Handles the specific CR-delimited CSV format of the PB980.
+        """
+        full_buffer = current_buffer + new_chunk
+        if len(full_buffer) > max_size:
+            return "", []  # Overflow protection
+
+        if '\r' not in full_buffer:
+            return full_buffer, []
+
+        lines = full_buffer.split('\r')
+        remaining_buffer = lines[-1]
+        complete_lines = lines[:-1]
+
+        results = []
+        for line in complete_lines:
+            clean = line.strip()
+            # PB980 sometimes sends control chars like \x02 or \x03.
+            # The split(',') usually handles them, but robust code ignores empty lines.
+            if not clean: continue
+
+            try:
+                parts = clean.split(',')
+                # Current requirement: must have at least 173 fields
+                if len(parts) >= 173:
+                    # Indices based on your current logic:
+                    # 7: Mode (e.g. A/C), 8: Mandatory (e.g. VC), 9: Spont
+                    mode = parts[7].strip()
+                    mandatory = parts[8].strip()
+                    spont = parts[9].strip()
+
+                    # Formatting the display string
+                    # Note: We filter out extra spaces if 'spont' is empty
+                    display_str = f"Mode: {mandatory} {spont} {mode}"
+                    # Cleanup double spaces if spont was empty
+                    display_str = display_str.replace("  ", " ")
+
+                    results.append(display_str)
+            except Exception:
+                pass
+
+        return remaining_buffer, results
+
     def process_settings_buffer(self, new_chunk):
-        self.settings_line_buffer += new_chunk
-        if len(self.settings_line_buffer) > self.MAX_BUFFER_SIZE:
-            self.settings_line_buffer = ""
-            return
-        if '\r' in self.settings_line_buffer:
-            lines = self.settings_line_buffer.split('\r')
-            for line in lines[:-1]:
-                clean = line.strip()
-                if clean:
-                    try:
-                        parts = clean.split(',')
-                        if len(parts) >= 173:
-                            mode = parts[7].strip()
-                            mandatory = parts[8].strip()
-                            spont = parts[9].strip()
-                            self.sig_settings_msg.emit(f"Mode: {mandatory} {spont} {mode}")
-                    except:
-                        pass
-            self.settings_line_buffer = lines[-1]
+        """
+        Orchestrator for settings.
+        """
+        self.settings_line_buffer, messages = self.parse_settings_chunk(
+            self.settings_line_buffer,
+            new_chunk,
+            self.MAX_BUFFER_SIZE
+        )
+
+        for msg in messages:
+            self.sig_settings_msg.emit(msg)
 
     def log_crash(self, e):
         try:
