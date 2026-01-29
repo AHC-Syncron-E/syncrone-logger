@@ -11,21 +11,18 @@ class TestUserInterface:
     """
     Logic-Focused UI Tests.
     BYPASSES APP INITIALIZATION ENTIRELY to prevent Windows Access Violations.
-    We test the methods (check_input, toggle_logging) on a manually configured instance.
+    Includes Teardown logic to prevent 'Cannot Close' popups from hanging CI.
     """
 
     @pytest.fixture
     def ui_app(self, qapp, qtbot, mocker):
         # 1. Create a BLANK instance of the App
-        # CRITICAL: We use __new__ to skip __init__ entirely.
-        # This guarantees NO crashing code (timers, icons, styles) ever runs.
         app = main.VentilatorApp.__new__(main.VentilatorApp)
 
         # 2. Manually Initialize Standard QMainWindow basics
-        # We must call the parent QMainWindow init to make it a valid Qt widget
         super(main.VentilatorApp, app).__init__()
 
-        # 3. Manually Initialize App State (The variables normally set in __init__)
+        # 3. Manually Initialize App State
         app.is_logging = False
         app.is_locked = False
         app.has_data_started = False
@@ -34,21 +31,20 @@ class TestUserInterface:
         app.session_breath_count = 0
         app.base_folder = MagicMock()
 
-        # 4. Mock the Backend Components usually created in __init__
+        # 4. Mock the Backend Components
         app.worker = MagicMock()
         app.snapshot_worker = MagicMock()
         app.telemetry = MagicMock()
         app.render_timer = MagicMock()
         app.ui_timer = MagicMock()
 
-        # 5. Inject UI Widgets (Fresh, Clean QWidgets)
+        # 5. Inject UI Widgets
         app.input_id = QLineEdit()
         app.btn_action = QPushButton("START RECORDING")
         app.btn_lock = QPushButton("LOCK APP")
         app.combo_stop = QComboBox()
         app.combo_stop.addItem("Test Option", {"type": "manual", "value": 0})
 
-        # Mock other labels to prevent AttributeErrors in logic
         app.lbl_started = QLabel()
         app.lbl_duration = QLabel()
         app.lbl_breaths = QLabel()
@@ -60,27 +56,40 @@ class TestUserInterface:
         app.mode_lbl = QLabel()
         app.seq_lbl = QLabel()
 
-        # Mock Plots (Heavy objects)
         app.p_plot = MagicMock()
         app.f_plot = MagicMock()
         app.p_plot.getViewBox.return_value = MagicMock()
         app.f_plot.getViewBox.return_value = MagicMock()
 
-        # 6. Manually Connect Signals (Replicating init_ui logic)
+        # 6. Manually Connect Signals
         app.input_id.textChanged.connect(app.check_input)
         app.btn_action.clicked.connect(app.toggle_logging)
         app.btn_lock.clicked.connect(app.toggle_lock)
 
-        # 7. Mock System Calls that methods might use
+        # 7. Mock System Calls & Popups (CRITICAL FIX FOR CI HANG)
         mocker.patch('main.VentilatorApp.check_disk_space', return_value=1_000_000_000_000)
-        # Mock worker constructors
         mocker.patch('main.VentilatorWorker', return_value=MagicMock())
         mocker.patch('main.SnapshotWorker', return_value=MagicMock())
+
+        # Mock QMessageBox so it doesn't block execution if triggered
+        mocker.patch('PySide6.QtWidgets.QMessageBox.warning')
+        mocker.patch('PySide6.QtWidgets.QMessageBox.critical')
+        mocker.patch('PySide6.QtWidgets.QMessageBox.information')
+        mocker.patch('PySide6.QtWidgets.QMessageBox.question')
 
         # 8. Register with qtbot
         qtbot.addWidget(app)
 
-        return app
+        # 9. Yield app to the test
+        yield app
+
+        # 10. TEARDOWN (CRITICAL FIX FOR CI HANG)
+        # Ensure the app state allows closing without a popup loop
+        app.is_logging = False
+        app.is_locked = False
+        # If the worker was "started" in the test, we ensure the mock is stopped
+        if app.worker:
+            app.worker.stop()
 
     def test_smoke_launch(self, ui_app):
         """Verify our manual setup matches expected initial state."""
@@ -88,7 +97,6 @@ class TestUserInterface:
         assert ui_app.is_locked is False
         assert ui_app.btn_action.isEnabled() is True
 
-        # Run check_input once to set correct button state
         ui_app.check_input()
         assert ui_app.btn_action.isEnabled() is False
 
