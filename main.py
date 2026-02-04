@@ -17,11 +17,21 @@ from collections import deque
 try:
     import psutil
     import wandb
+
     HAS_TELEMETRY_LIBS = True
 except ImportError:
     HAS_TELEMETRY_LIBS = False
 
+# EDF and Math Libraries (NEW IMPORTS)
 import numpy as np
+
+try:
+    from edfio import Edf, EdfSignal, EdfAnnotation, Patient
+
+    HAS_EDF_LIB = True
+except ImportError:
+    HAS_EDF_LIB = False
+    print("CRITICAL WARNING: 'edfio' library not found. Snapshots will fail.")
 
 # Serial Communication
 import serial
@@ -41,7 +51,7 @@ import pyqtgraph as pg
 # -----------------------------------------------------------------------------
 # GLOBAL CONSTANTS
 # -----------------------------------------------------------------------------
-APP_VERSION = "1.2.3"  # Bumped version
+APP_VERSION = "1.3.0"  # Bumped version
 DEBUG_PIN = "REDACTED_PIN"  # PIN required to access internal debugger
 
 
@@ -134,6 +144,7 @@ class TelemetryManager(QThread):
             except:
                 pass
             self.is_active = False
+
 
 # -----------------------------------------------------------------------------
 # 0. HELPER UI CLASSES
@@ -410,7 +421,10 @@ class DatabaseManager:
             columns = [info[1] for info in cursor.fetchall()]
             temp_conn.close()
             if "waveforms" not in self._get_tables(self.db_path): return False
-            if "parsed_pressure" not in columns: return True
+
+            # Check for new EDF columns
+            if "vent_mode" not in columns or "breath_index" not in columns:
+                return True
             return False
         except:
             return False
@@ -428,13 +442,14 @@ class DatabaseManager:
 
     def _backup_and_reset(self):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        backup_name = self.db_path.parent / f"syncrone_backup_{timestamp}.db"
+        backup_name = self.db_path.parent / f"syncrone_backup_SCHEMA_{timestamp}.db"
         try:
             shutil.move(str(self.db_path), str(backup_name))
         except:
             pass
 
     def _create_tables(self):
+        # UPDATED SCHEMA: added vent_mode and breath_index
         self.conn.execute("""
                           CREATE TABLE IF NOT EXISTS waveforms
                           (
@@ -452,11 +467,16 @@ class DatabaseManager:
                               parsed_pressure
                               REAL,
                               parsed_flow
-                              REAL
+                              REAL,
+                              vent_mode
+                              TEXT,
+                              breath_index
+                              INTEGER
                           )
                           """)
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_wf_sess ON waveforms (session_id);")
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_wf_time ON waveforms (timestamp);")
+
         self.conn.execute("""
                           CREATE TABLE IF NOT EXISTS settings
                           (
@@ -477,11 +497,12 @@ class DatabaseManager:
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_st_time ON settings (timestamp);")
         self.conn.commit()
 
-    def insert_waveform(self, session_id, raw_data, pressure=None, flow=None):
+    # MODIFIED: Accepts optional clinical metadata
+    def insert_waveform(self, session_id, raw_data, pressure=None, flow=None, mode=None, breath_idx=None):
         ts = datetime.now().isoformat()
         self.conn.execute(
-            "INSERT INTO waveforms (session_id, timestamp, raw_data, parsed_pressure, parsed_flow) VALUES (?, ?, ?, ?, ?)",
-            (session_id, ts, raw_data, pressure, flow)
+            "INSERT INTO waveforms (session_id, timestamp, raw_data, parsed_pressure, parsed_flow, vent_mode, breath_index) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (session_id, ts, raw_data, pressure, flow, mode, breath_idx)
         )
 
     def insert_setting(self, session_id, raw_data):
@@ -553,77 +574,132 @@ class BreathMarkerManager:
 
 
 # -----------------------------------------------------------------------------
-# 3. SNAPSHOT WORKER
+# 3. SNAPSHOT WORKER (NEW EDF IMPLEMENTATION)
 # -----------------------------------------------------------------------------
 class SnapshotWorker(QThread):
-    def __init__(self, db_path, output_folder):
+    def __init__(self, db_path, output_folder, patient_id):
         super().__init__()
         self.db_path = str(db_path)
-        self.output_folder = output_folder  # This is likely the USER visible folder
+        self.output_folder = output_folder
+        self.patient_id = patient_id
         self.is_running = True
 
     def run(self):
         time.sleep(10)
         while self.is_running:
-            for _ in range(300):
+            # Wait ~2 minutes
+            for _ in range(120):
                 if not self.is_running: return
                 time.sleep(1)
 
             if not self.is_running: return
 
             try:
-                self.generate_files()
-            except Exception:
-                pass
+                if HAS_EDF_LIB:
+                    self.generate_edf()
+                else:
+                    pass
+            except Exception as e:
+                try:
+                    with open(self.output_folder / "edf_error_log.txt", "a") as f:
+                        f.write(f"[{datetime.now()}] EDF Gen Fail: {e}\n")
+                except:
+                    pass
 
-    def generate_files(self):
-        cutoff = (datetime.now() - timedelta(hours=1)).isoformat()
+    def generate_edf(self):
+        now_dt = datetime.now()
+        cutoff = (now_dt - timedelta(hours=1)).isoformat()
 
-        # Connect to DB locally in this thread
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
-        # Helper to stream data to disk (FIX: Streaming instead of fetchall)
-        def stream_to_file(query, filename):
-            temp_name = self.output_folder / f"~temp_{filename}.tmp"
-            final_name = self.output_folder / filename
-
-            cursor.execute(query, (cutoff,))
-
-            has_data = False
-            with open(temp_name, 'w', encoding='utf-8') as f:
-                while True:
-                    # Fetch 1000 rows at a time to prevent RAM spikes
-                    batch = cursor.fetchmany(1000)
-                    if not batch: break
-                    has_data = True
-                    for row in batch:
-                        f.write(row[0])
-
-            if has_data:
-                if final_name.exists():
-                    try:
-                        os.remove(final_name)
-                    except:
-                        pass
-                try:
-                    os.rename(temp_name, final_name)
-                except:
-                    pass
-            else:
-                if temp_name.exists():
-                    try:
-                        os.remove(temp_name)
-                    except:
-                        pass
-
-        # 1. Stream Waveforms
-        stream_to_file("SELECT raw_data FROM waveforms WHERE timestamp > ? ORDER BY id ASC", "LAST_1HOUR_WAVEFORMS.txt")
-
-        # 2. Stream Settings
-        stream_to_file("SELECT raw_data FROM settings WHERE timestamp > ? ORDER BY id ASC", "LAST_1HOUR_SETTINGS.txt")
-
+        query = """
+                SELECT parsed_pressure, parsed_flow, vent_mode, breath_index
+                FROM waveforms
+                WHERE timestamp > ?
+                ORDER BY id ASC \
+                """
+        cursor.execute(query, (cutoff,))
+        rows = cursor.fetchall()
         conn.close()
+
+        # [FIX 1] Truncation: Ensure integer seconds of data
+        fs = 50
+        num_samples = len(rows)
+        if num_samples < fs:
+            return
+
+        remainder = num_samples % fs
+        if remainder > 0:
+            rows = rows[:-remainder]
+
+        # Prepare signals
+        pressures = np.array([r[0] if r[0] is not None else 0.0 for r in rows], dtype=np.float32)
+        flows = np.array([r[1] if r[1] is not None else 0.0 for r in rows], dtype=np.float32)
+
+        p_sig = EdfSignal(pressures, sampling_frequency=fs, label="Pressure", physical_dimension="cmH2O")
+        f_sig = EdfSignal(flows, sampling_frequency=fs, label="Flow", physical_dimension="L/min")
+
+        # [FIX 2] Strict Text Sanitizer
+        # Removes ALL control characters (like \x00, \x02) that break EDF parsers
+        def safe_ascii(s):
+            if not s: return "Unknown"
+            # Keep only alphanumeric and basic safe punctuation
+            return "".join(c for c in s if c.isalnum() or c in " -_.")
+
+        annotations = []
+        last_idx = None
+
+        for i, row in enumerate(rows):
+            raw_mode = row[2] if row[2] else "Unknown"
+            current_idx = row[3]
+
+            if current_idx is not None and current_idx != last_idx:
+                onset_sec = i / float(fs)
+
+                clean_mode = safe_ascii(raw_mode)
+                # [FIX 3] Use 'Nr' instead of '#' and duration=None
+                # duration=None signals a "point event" to EDFbrowser
+                text = f"{clean_mode} Nr{current_idx}"
+
+                annot = EdfAnnotation(onset=onset_sec, duration=None, text=text)
+                annotations.append(annot)
+                last_idx = current_idx
+
+        # Build EDF
+        edf = Edf(signals=[p_sig, f_sig])
+        if annotations:
+            edf.add_annotations(annotations)
+
+        # [FIX 4] Patient ID Sanitization (No spaces allowed in subfields)
+        clean_pid = self.patient_id.strip().replace(" ", "_")
+        if not clean_pid: clean_pid = "X"
+
+        edf.patient = Patient(name=clean_pid)
+
+        start_time_obj = now_dt - timedelta(hours=1)
+        edf.startdate = start_time_obj.date()
+        edf.starttime = start_time_obj.time()
+
+        file_ts = now_dt.strftime("%Y%m%d_%H%M%S")
+        filename = f"{clean_pid}_{file_ts}_1H.edf"
+        final_path = self.output_folder / filename
+        temp_path = self.output_folder / f"~temp_{filename}.tmp"
+
+        try:
+            edf.write(str(temp_path))
+            if temp_path.exists():
+                if final_path.exists():
+                    os.remove(final_path)
+                os.rename(temp_path, final_path)
+        except Exception:
+            if temp_path.exists():
+                os.remove(temp_path)
+
+        del pressures
+        del flows
+        del rows
+        del edf
 
 
 # -----------------------------------------------------------------------------
@@ -644,17 +720,19 @@ class VentilatorWorker(QThread):
         self.patient_id = patient_id
         self.is_running = False
 
+        # CLINICAL STATE TRACKING (New additions)
+        self.current_vent_mode = "Unknown"
+        self.current_breath_index = 0
+
         # --- PATH LOGIC ---
         self.root_folder = Path.home() / "Desktop" / "Syncron-E Data"
 
-        # FIX: Extract only Major.Minor for storage stability
         version_parts = APP_VERSION.split('.')
-        storage_version = "1.0"  # Fallback
+        storage_version = "1.0"
         if len(version_parts) >= 2:
             storage_version = f"{version_parts[0]}.{version_parts[1]}"
 
         self.system_folder = self.root_folder / ".syncrone_system" / f"v{storage_version}"
-
         self.logs_folder = self.system_folder / "logs"
         self.raw_data_folder = self.system_folder / "raw_data"
 
@@ -680,15 +758,13 @@ class VentilatorWorker(QThread):
         self.current_file_date = None
         self.SUPPORTED_DEVICES = [(0x0403, 0x6001), (0x067B, 0x23A3), (0x067B, 0x2303)]
 
-        # Kept for compatibility with initial detection logic
         self.waveform_pattern = re.compile(r"BS,\s*S:(\d+),")
 
         self.reconnect_timeout_seconds = 120
 
-        # --- FIX: THROTTLE TRACKERS ---
         self.last_rx_emit_a = 0
         self.last_rx_emit_b = 0
-        self.rx_throttle_interval = 0.1  # Limit to 10Hz
+        self.rx_throttle_interval = 0.1
 
     def open_log_files(self):
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -824,11 +900,10 @@ class VentilatorWorker(QThread):
                     now = time.monotonic()
                     self.check_file_rotation()
 
-                    # --- PORT A HANDLING ---
+                    # --- PORT A ---
                     if self.port_a and self.port_a.in_waiting > 0:
                         data_a = self.port_a.read(self.port_a.in_waiting).decode('latin-1', errors='ignore')
 
-                        # FIX: THROTTLE SIGNAL EMISSION
                         if now - self.last_rx_emit_a > self.rx_throttle_interval:
                             self.sig_rx_activity.emit("A")
                             self.last_rx_emit_a = now
@@ -845,11 +920,10 @@ class VentilatorWorker(QThread):
                             else:
                                 self.handle_settings(data_a)
 
-                    # --- PORT B HANDLING ---
+                    # --- PORT B ---
                     if self.port_b and self.port_b.in_waiting > 0:
                         data_b = self.port_b.read(self.port_b.in_waiting).decode('latin-1', errors='ignore')
 
-                        # FIX: THROTTLE SIGNAL EMISSION
                         if now - self.last_rx_emit_b > self.rx_throttle_interval:
                             self.sig_rx_activity.emit("B")
                             self.last_rx_emit_b = now
@@ -886,7 +960,7 @@ class VentilatorWorker(QThread):
                         next_wake = time.monotonic()
                     next_wake += loop_interval
 
-                except (serial.SerialException, OSError) as e:
+                except (serial.SerialException, OSError):
                     success = self.perform_reconnect_procedure()
                     if success:
                         self.sig_connection_restored.emit()
@@ -915,18 +989,70 @@ class VentilatorWorker(QThread):
         s_name = self.settings_port.port
         self.sig_status_update.emit(f"RECORDING | Wave: {w_name} | Set: {s_name}", "#00ff00")
         self.safe_write_file(self.file_waveform, init_buffer)
-        self.db_manager.insert_waveform(self.patient_id, init_buffer)
+
+        # Initial insert
+        self.db_manager.insert_waveform(
+            self.patient_id,
+            init_buffer,
+            mode=self.current_vent_mode,
+            breath_idx=self.current_breath_index
+        )
         self.process_waveform_buffer(init_buffer)
 
+    # -------------------------------------------------------------------------
+    # RESTORED: Exactly original logic for regression safety
+    # -------------------------------------------------------------------------
     def handle_waveform(self, data):
         self.safe_write_file(self.file_waveform, data)
         try:
             parsed = self.process_waveform_buffer(data)
             p = parsed[0] if parsed else None
             f = parsed[1] if parsed else None
-            self.db_manager.insert_waveform(self.patient_id, data, p, f)
+
+            # MINIMUM CHANGE: We pass the NEW metadata args here, but the call logic
+            # remains "Insert once per chunk with last parsed values"
+            self.db_manager.insert_waveform(
+                self.patient_id,
+                data,
+                p,
+                f,
+                self.current_vent_mode,
+                self.current_breath_index
+            )
         except:
             self.db_manager.insert_waveform(self.patient_id, data)
+
+    # -------------------------------------------------------------------------
+    # RESTORED: Exactly original logic for regression safety
+    # Added: One line to update self.current_breath_index
+    # -------------------------------------------------------------------------
+    def process_waveform_buffer(self, new_chunk):
+        """
+        Orchestrator: Calls static parser and emits signals.
+        """
+        self.waveform_line_buffer, events = self.parse_incoming_chunk(
+            self.waveform_line_buffer,
+            new_chunk,
+            self.MAX_BUFFER_SIZE
+        )
+
+        last_vals = None
+
+        for event in events:
+            evt_type = event[0]
+
+            if evt_type == 'BREATH':
+                seq_num = event[1]
+                # NEW: Update State for DB/EDF
+                self.current_breath_index = int(seq_num)
+                self.sig_breath_seq.emit(seq_num)
+
+            elif evt_type == 'DATA':
+                pressure, flow = event[1], event[2]
+                self.sig_waveform_data.emit(pressure, flow)
+                last_vals = (pressure, flow)
+
+        return last_vals
 
     def handle_settings(self, data):
         self.safe_write_file(self.file_settings, data)
@@ -980,32 +1106,6 @@ class VentilatorWorker(QThread):
 
         return remaining_buffer, events
 
-    def process_waveform_buffer(self, new_chunk):
-        """
-        Orchestrator: Calls static parser and emits signals.
-        """
-        self.waveform_line_buffer, events = self.parse_incoming_chunk(
-            self.waveform_line_buffer,
-            new_chunk,
-            self.MAX_BUFFER_SIZE
-        )
-
-        last_vals = None
-
-        for event in events:
-            evt_type = event[0]
-
-            if evt_type == 'BREATH':
-                seq_num = event[1]
-                self.sig_breath_seq.emit(seq_num)
-
-            elif evt_type == 'DATA':
-                pressure, flow = event[1], event[2]
-                self.sig_waveform_data.emit(pressure, flow)
-                last_vals = (pressure, flow)
-
-        return last_vals
-
     @staticmethod
     def parse_settings_chunk(current_buffer, new_chunk, max_size=8192):
         """
@@ -1025,24 +1125,16 @@ class VentilatorWorker(QThread):
         results = []
         for line in complete_lines:
             clean = line.strip()
-            # PB980 sometimes sends control chars like \x02 or \x03.
-            # The split(',') usually handles them, but robust code ignores empty lines.
             if not clean: continue
 
             try:
                 parts = clean.split(',')
-                # Current requirement: must have at least 173 fields
                 if len(parts) >= 173:
-                    # Indices based on your current logic:
-                    # 7: Mode (e.g. A/C), 8: Mandatory (e.g. VC), 9: Spont
                     mode = parts[7].strip()
                     mandatory = parts[8].strip()
                     spont = parts[9].strip()
 
-                    # Formatting the display string
-                    # Note: We filter out extra spaces if 'spont' is empty
                     display_str = f"Mode: {mandatory} {spont} {mode}"
-                    # Cleanup double spaces if spont was empty
                     display_str = display_str.replace("  ", " ")
 
                     results.append(display_str)
@@ -1062,6 +1154,9 @@ class VentilatorWorker(QThread):
         )
 
         for msg in messages:
+            # NEW: Update State for DB/EDF
+            if "Mode:" in msg:
+                self.current_vent_mode = msg.replace("Mode:", "").strip()
             self.sig_settings_msg.emit(msg)
 
     def log_crash(self, e):
@@ -1100,7 +1195,6 @@ class VentilatorApp(QMainWindow):
         self.start_disk_space = 0
 
         # RENDER QUEUE & TIMING (Jitter Buffer)
-        # --- FIX: BOUNDED QUEUE TO PREVENT OOM ---
         self.render_queue = deque(maxlen=2500)
         self.render_timer = QTimer()
         self.render_timer.setInterval(20)  # Target 20ms (50Hz)
@@ -1604,7 +1698,8 @@ class VentilatorApp(QMainWindow):
             self.btn_action.setStyleSheet("background-color: #cc3300; color: white; border-radius: 5px;")
 
             # 1. Main Worker
-            self.worker = VentilatorWorker(self.input_id.text().strip())
+            pid = self.input_id.text().strip()
+            self.worker = VentilatorWorker(pid)
             self.worker.sig_status_update.connect(self.update_status)
             self.worker.sig_settings_msg.connect(self.update_mode_display)
             self.worker.sig_breath_seq.connect(self.update_breath_index)
@@ -1617,7 +1712,7 @@ class VentilatorApp(QMainWindow):
 
             # 2. Snapshot Worker
             db_path = self.worker.system_folder / "syncrone.db"
-            self.snapshot_worker = SnapshotWorker(db_path, self.base_folder)
+            self.snapshot_worker = SnapshotWorker(db_path, self.base_folder, pid)
             self.snapshot_worker.start()
 
             self.last_pkt_time = time.monotonic()
