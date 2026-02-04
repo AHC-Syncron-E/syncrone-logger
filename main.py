@@ -668,16 +668,17 @@ class SnapshotWorker(QThread):
                 onset_sec = i / float(fs)
 
                 clean_mode = safe_ascii(raw_mode)
-                text = f"{clean_mode} Nr{current_idx}"
+                text = f"{clean_mode}-{current_idx}"
 
                 annot = EdfAnnotation(onset=onset_sec, duration=None, text=text)
                 annotations.append(annot)
                 last_idx = current_idx
 
         # Build EDF
-        edf = Edf(signals=[p_sig, f_sig])
         if annotations:
-            edf.add_annotations(annotations)
+            edf = Edf(signals=[p_sig, f_sig], annotations=annotations)
+        else:
+            edf = Edf(signals=[p_sig, f_sig])
 
         # [FIX 4] Patient ID Sanitization
         clean_pid = self.patient_id.strip().replace(" ", "_")
