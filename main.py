@@ -22,7 +22,7 @@ try:
 except ImportError:
     HAS_TELEMETRY_LIBS = False
 
-# EDF and Math Libraries (NEW IMPORTS)
+# EDF and Math Libraries
 import numpy as np
 
 try:
@@ -51,7 +51,7 @@ import pyqtgraph as pg
 # -----------------------------------------------------------------------------
 # GLOBAL CONSTANTS
 # -----------------------------------------------------------------------------
-APP_VERSION = "1.3.0"  # Bumped version
+APP_VERSION = "1.3.1"  # Bumped version for batch-sample fix
 DEBUG_PIN = "REDACTED_PIN"  # PIN required to access internal debugger
 
 
@@ -449,7 +449,7 @@ class DatabaseManager:
             pass
 
     def _create_tables(self):
-        # UPDATED SCHEMA: added vent_mode and breath_index
+        # SCHEMA: one row per sample
         self.conn.execute("""
                           CREATE TABLE IF NOT EXISTS waveforms
                           (
@@ -497,7 +497,18 @@ class DatabaseManager:
         self.conn.execute("CREATE INDEX IF NOT EXISTS idx_st_time ON settings (timestamp);")
         self.conn.commit()
 
-    # MODIFIED: Accepts optional clinical metadata
+    # --- BATCH INSERT (NEW FIX) ---
+    def insert_batch_waveforms(self, rows):
+        """
+        Inserts multiple waveform samples at once for high fidelity.
+        rows: List of tuples (session_id, timestamp, raw_data, pressure, flow, mode, breath_idx)
+        """
+        self.conn.executemany(
+            "INSERT INTO waveforms (session_id, timestamp, raw_data, parsed_pressure, parsed_flow, vent_mode, breath_index) VALUES (?, ?, ?, ?, ?, ?, ?)",
+            rows
+        )
+
+    # Legacy method (kept for initial handshake or non-batch use)
     def insert_waveform(self, session_id, raw_data, pressure=None, flow=None, mode=None, breath_idx=None):
         ts = datetime.now().isoformat()
         self.conn.execute(
@@ -613,6 +624,7 @@ class SnapshotWorker(QThread):
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
+        # Query all samples (One row per sample now!)
         query = """
                 SELECT parsed_pressure, parsed_flow, vent_mode, breath_index
                 FROM waveforms
@@ -641,10 +653,8 @@ class SnapshotWorker(QThread):
         f_sig = EdfSignal(flows, sampling_frequency=fs, label="Flow", physical_dimension="L/min")
 
         # [FIX 2] Strict Text Sanitizer
-        # Removes ALL control characters (like \x00, \x02) that break EDF parsers
         def safe_ascii(s):
             if not s: return "Unknown"
-            # Keep only alphanumeric and basic safe punctuation
             return "".join(c for c in s if c.isalnum() or c in " -_.")
 
         annotations = []
@@ -658,8 +668,6 @@ class SnapshotWorker(QThread):
                 onset_sec = i / float(fs)
 
                 clean_mode = safe_ascii(raw_mode)
-                # [FIX 3] Use 'Nr' instead of '#' and duration=None
-                # duration=None signals a "point event" to EDFbrowser
                 text = f"{clean_mode} Nr{current_idx}"
 
                 annot = EdfAnnotation(onset=onset_sec, duration=None, text=text)
@@ -671,7 +679,7 @@ class SnapshotWorker(QThread):
         if annotations:
             edf.add_annotations(annotations)
 
-        # [FIX 4] Patient ID Sanitization (No spaces allowed in subfields)
+        # [FIX 4] Patient ID Sanitization
         clean_pid = self.patient_id.strip().replace(" ", "_")
         if not clean_pid: clean_pid = "X"
 
@@ -685,6 +693,14 @@ class SnapshotWorker(QThread):
         filename = f"{clean_pid}_{file_ts}_1H.edf"
         final_path = self.output_folder / filename
         temp_path = self.output_folder / f"~temp_{filename}.tmp"
+
+        # [FIX 5] CLEANUP OLD EDF FILES (Ensure only 1 file exists)
+        # We delete ALL .edf files in this folder before writing the new one.
+        for existing_file in self.output_folder.glob("*.edf"):
+            try:
+                os.remove(existing_file)
+            except OSError:
+                pass
 
         try:
             edf.write(str(temp_path))
@@ -988,71 +1004,73 @@ class VentilatorWorker(QThread):
         w_name = self.waveform_port.port
         s_name = self.settings_port.port
         self.sig_status_update.emit(f"RECORDING | Wave: {w_name} | Set: {s_name}", "#00ff00")
-        self.safe_write_file(self.file_waveform, init_buffer)
 
-        # Initial insert
-        self.db_manager.insert_waveform(
-            self.patient_id,
-            init_buffer,
-            mode=self.current_vent_mode,
-            breath_idx=self.current_breath_index
-        )
-        self.process_waveform_buffer(init_buffer)
+        # We manually process the init buffer with the new handler logic
+        self.handle_waveform(init_buffer)
 
     # -------------------------------------------------------------------------
-    # RESTORED: Exactly original logic for regression safety
+    # NEW FIX: HIGH FIDELITY STORAGE (ONE ROW PER SAMPLE)
     # -------------------------------------------------------------------------
     def handle_waveform(self, data):
+        # 1. Write to text file (This is the immutable "Black Box" log)
         self.safe_write_file(self.file_waveform, data)
-        try:
-            parsed = self.process_waveform_buffer(data)
-            p = parsed[0] if parsed else None
-            f = parsed[1] if parsed else None
 
-            # MINIMUM CHANGE: We pass the NEW metadata args here, but the call logic
-            # remains "Insert once per chunk with last parsed values"
-            self.db_manager.insert_waveform(
-                self.patient_id,
-                data,
-                p,
-                f,
-                self.current_vent_mode,
-                self.current_breath_index
-            )
-        except:
-            self.db_manager.insert_waveform(self.patient_id, data)
-
-    # -------------------------------------------------------------------------
-    # RESTORED: Exactly original logic for regression safety
-    # Added: One line to update self.current_breath_index
-    # -------------------------------------------------------------------------
-    def process_waveform_buffer(self, new_chunk):
-        """
-        Orchestrator: Calls static parser and emits signals.
-        """
+        # 2. Parse the chunk into events
         self.waveform_line_buffer, events = self.parse_incoming_chunk(
             self.waveform_line_buffer,
-            new_chunk,
+            data,
             self.MAX_BUFFER_SIZE
         )
 
-        last_vals = None
+        batch_data = []
+
+        # Timestamp interpolation
+        # We received this chunk 'now'. It likely contains ~5 samples (100ms).
+        # To avoid staircase timestamps, we interpolate backwards.
+        now = datetime.now()
+        base_ts = now.timestamp()
+        dt_step = 0.02  # Approx 50Hz
+
+        # Count how many data points are in this chunk
+        data_event_count = sum(1 for e in events if e[0] == 'DATA')
+        data_idx = 0
 
         for event in events:
             evt_type = event[0]
 
             if evt_type == 'BREATH':
                 seq_num = event[1]
-                # NEW: Update State for DB/EDF
                 self.current_breath_index = int(seq_num)
                 self.sig_breath_seq.emit(seq_num)
 
             elif evt_type == 'DATA':
                 pressure, flow = event[1], event[2]
-                self.sig_waveform_data.emit(pressure, flow)
-                last_vals = (pressure, flow)
 
-        return last_vals
+                # Interpolate timestamp: T_sample = T_base - (Samples_Left * dt)
+                # This puts the last sample at 'now', and previous ones slightly in past
+                offset = (data_event_count - 1 - data_idx) * dt_step
+                sample_time = datetime.fromtimestamp(base_ts - offset).isoformat()
+
+                # Prepare row for batch insert
+                # raw_data is None because we have the .txt files
+                row = (
+                    self.patient_id,
+                    sample_time,
+                    None,
+                    pressure,
+                    flow,
+                    self.current_vent_mode,
+                    self.current_breath_index
+                )
+                batch_data.append(row)
+                data_idx += 1
+
+                # Emit latest point to GUI for real-time graph
+                self.sig_waveform_data.emit(pressure, flow)
+
+        # 3. Batch Insert into DB
+        if batch_data:
+            self.db_manager.insert_batch_waveforms(batch_data)
 
     def handle_settings(self, data):
         self.safe_write_file(self.file_settings, data)
