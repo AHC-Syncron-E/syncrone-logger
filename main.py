@@ -585,7 +585,7 @@ class BreathMarkerManager:
 
 
 # -----------------------------------------------------------------------------
-# 3. SNAPSHOT WORKER (NEW EDF IMPLEMENTATION)
+# 3. SNAPSHOT WORKER (UPDATED WITH MODE MAPPINGS)
 # -----------------------------------------------------------------------------
 class SnapshotWorker(QThread):
     def __init__(self, db_path, output_folder, patient_id):
@@ -624,7 +624,7 @@ class SnapshotWorker(QThread):
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
-        # Query all samples (One row per sample now!)
+        # Query all samples
         query = """
                 SELECT parsed_pressure, parsed_flow, vent_mode, breath_index
                 FROM waveforms
@@ -635,7 +635,7 @@ class SnapshotWorker(QThread):
         rows = cursor.fetchall()
         conn.close()
 
-        # [FIX 1] Truncation: Ensure integer seconds of data
+        # Truncation: Ensure integer seconds of data
         fs = 50
         num_samples = len(rows)
         if num_samples < fs:
@@ -652,10 +652,29 @@ class SnapshotWorker(QThread):
         p_sig = EdfSignal(pressures, sampling_frequency=fs, label="Pressure", physical_dimension="cmH2O")
         f_sig = EdfSignal(flows, sampling_frequency=fs, label="Flow", physical_dimension="L/min")
 
-        # [FIX 2] Strict Text Sanitizer
-        def safe_ascii(s):
-            if not s: return "Unknown"
-            return "".join(c for c in s if c.isalnum() or c in " -_.")
+        # --- MODE STANDARDIZATION LOGIC ---
+        MODE_MAPPINGS = {
+            "VC A/C": "VCV",
+            "VC": "VCV",
+            "VC+ A/C": "VCV",
+            "VC+": "VCV",
+            "PC A/C": "PCV",
+            "PC": "PCV"
+        }
+
+        def get_clean_mode(raw_s):
+            if not raw_s: return "Unknown"
+
+            # 1. Check strict mapping first
+            # We strip whitespace just in case, but keep case sensitivity
+            # (or use .upper() if you expect casing variance)
+            check_key = raw_s.strip()
+            if check_key in MODE_MAPPINGS:
+                return MODE_MAPPINGS[check_key]
+
+            # 2. Fallback to strict sanitizer
+            # (Removes + / characters etc)
+            return "".join(c for c in raw_s if c.isalnum() or c in " -_.")
 
         annotations = []
         last_idx = None
@@ -667,8 +686,9 @@ class SnapshotWorker(QThread):
             if current_idx is not None and current_idx != last_idx:
                 onset_sec = i / float(fs)
 
-                clean_mode = safe_ascii(raw_mode)
-                text = f"{clean_mode}-{current_idx}"
+                # Use the new mapping function
+                final_mode_str = get_clean_mode(raw_mode)
+                text = f"{final_mode_str}-{current_idx}"
 
                 annot = EdfAnnotation(onset=onset_sec, duration=None, text=text)
                 annotations.append(annot)
@@ -680,7 +700,7 @@ class SnapshotWorker(QThread):
         else:
             edf = Edf(signals=[p_sig, f_sig])
 
-        # [FIX 4] Patient ID Sanitization
+        # Patient ID Sanitization
         clean_pid = self.patient_id.strip().replace(" ", "_")
         if not clean_pid: clean_pid = "X"
 
@@ -695,8 +715,7 @@ class SnapshotWorker(QThread):
         final_path = self.output_folder / filename
         temp_path = self.output_folder / f"~temp_{filename}.tmp"
 
-        # [FIX 5] CLEANUP OLD EDF FILES (Ensure only 1 file exists)
-        # We delete ALL .edf files in this folder before writing the new one.
+        # Cleanup old files
         for existing_file in self.output_folder.glob("*.edf"):
             try:
                 os.remove(existing_file)
