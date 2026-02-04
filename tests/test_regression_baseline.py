@@ -16,7 +16,8 @@ class TestLegacyParserBehavior:
         mocker.patch('main.VentilatorWorker.close_system')
 
         # Instantiate
-        worker = VentilatorWorker("TEST_PATIENT")
+        # UPDATED: Added "dummy.db" to satisfy new __init__ signature
+        worker = VentilatorWorker("TEST_PATIENT", "dummy.db")
 
         # Inject the temp_db fixture so it doesn't crash on DB calls
         worker.db_manager = temp_db

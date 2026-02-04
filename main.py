@@ -52,7 +52,7 @@ import pyqtgraph as pg
 # -----------------------------------------------------------------------------
 # GLOBAL CONSTANTS
 # -----------------------------------------------------------------------------
-APP_VERSION = "1.4.0"  # Bumped version for Session-Based DB support
+APP_VERSION = "1.4.1"  # Bumped version for Auto-Lock
 DEBUG_PIN = "REDACTED_PIN"  # PIN required to access internal debugger
 
 
@@ -1275,6 +1275,15 @@ class VentilatorApp(QMainWindow):
         self.prevent_sleep()
         self.init_ui()
 
+        # AUTO-LOCK LOGIC (NEW)
+        self.inactivity_timer = QTimer(self)
+        self.inactivity_timer.setInterval(5 * 60 * 1000)  # 5 Minutes
+        self.inactivity_timer.timeout.connect(self.perform_auto_lock)
+        self.inactivity_timer.start()
+
+        # Install Global Event Filter to catch mouse/keyboard across the whole app
+        QApplication.instance().installEventFilter(self)
+
         if self.config_corrupt_msg:
             QTimer.singleShot(500, lambda: QMessageBox.warning(self, "Config Reset", self.config_corrupt_msg))
 
@@ -1644,6 +1653,30 @@ class VentilatorApp(QMainWindow):
             event.ignore()
         else:
             event.accept()
+
+    def eventFilter(self, obj, event):
+        """
+        Detects user activity to reset the auto-lock timer.
+        """
+        if event.type() in (QEvent.MouseMove, QEvent.MouseButtonPress,
+                            QEvent.KeyPress, QEvent.Wheel):
+            # Reset timer if app is not already locked
+            if not self.is_locked:
+                self.inactivity_timer.start()
+
+        return super().eventFilter(obj, event)
+
+    def perform_auto_lock(self):
+        """
+        Called by timer. Only locks if currently unlocked.
+        """
+        if not self.is_locked:
+            self.toggle_lock()
+            # Optional: status update so user knows why it happened
+            if self.is_logging:
+                self.update_status("RECORDING (Auto-Locked)", "#00ff00")
+            else:
+                self.status_lbl.setText("READY (Auto-Locked)")
 
     def toggle_lock(self):
         self.is_locked = not self.is_locked

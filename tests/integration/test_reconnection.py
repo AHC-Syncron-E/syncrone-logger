@@ -91,7 +91,8 @@ class TestReconnectionLogic:
         mocker.patch('main.VentilatorWorker.safe_write_file')
 
         # 2. Create Worker with Temp DB
-        worker = VentilatorWorker("TEST_RECONNECT")
+        # UPDATED: Added "dummy.db" to satisfy new __init__ signature
+        worker = VentilatorWorker("TEST_RECONNECT", "dummy.db")
         worker.db_manager = temp_db
 
         # 3. TIMING ADJUSTMENT FOR TEST STABILITY
