@@ -33,7 +33,7 @@ jobs:
       - name: Install Dependencies
         run: |
           pip install nuitka zstandard
-          pip install pyside6 numpy pyqtgraph pyserial
+          pip install pyside6 numpy pyqtgraph pyserial edfio
 
       # --- NEW: Set Dynamic Version ---
       # Combines "1.0.0" + "RunNumber" (e.g. 45) -> "1.0.0.45"
@@ -62,6 +62,8 @@ jobs:
             --noinclude-unittest-mode=nofollow `
             --noinclude-setuptools-mode=nofollow `
             --noinclude-IPython-mode=nofollow `
+            --nofollow-import-to=wandb `
+            --nofollow-import-to=psutil `
             --windows-icon-from-ico=icon.ico `
             --windows-console-mode=disable `
             --output-dir=build `
