@@ -51,7 +51,7 @@ import pyqtgraph as pg
 # -----------------------------------------------------------------------------
 # GLOBAL CONSTANTS
 # -----------------------------------------------------------------------------
-APP_VERSION = "1.3.1"  # Bumped version for batch-sample fix
+APP_VERSION = "1.4.0"  # Bumped version for Session-Based DB support
 DEBUG_PIN = "REDACTED_PIN"  # PIN required to access internal debugger
 
 
@@ -751,9 +751,10 @@ class VentilatorWorker(QThread):
     sig_connection_lost = Signal()
     sig_connection_restored = Signal()
 
-    def __init__(self, patient_id):
+    def __init__(self, patient_id, db_path):
         super().__init__()
         self.patient_id = patient_id
+        self.db_path = db_path
         self.is_running = False
 
         # CLINICAL STATE TRACKING (New additions)
@@ -843,8 +844,8 @@ class VentilatorWorker(QThread):
                 pass
 
     def setup_system(self):
-        db_path = self.system_folder / "syncrone.db"
-        self.db_manager = DatabaseManager(str(db_path))
+        # CHANGED: Use the passed DB path, not the system one
+        self.db_manager = DatabaseManager(str(self.db_path))
         self.db_manager.connect()
         self.open_log_files()
 
@@ -1724,6 +1725,26 @@ class VentilatorApp(QMainWindow):
             self.is_buffering = True
             self.buffer_start_time = None
 
+            # ---------------------------------------------------------
+            # NEW: Generate Session-Based Database Path
+            # ---------------------------------------------------------
+            pid = self.input_id.text().strip()
+
+            # Sanitize PID for filename (remove invalid chars)
+            clean_pid = "".join(c for c in pid if c.isalnum() or c in "-_")
+            if not clean_pid: clean_pid = "Session"
+
+            # Timestamp: YYYYMMDD_HHMMSS
+            ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+            db_filename = f"syncrone_{clean_pid}_{ts_str}.db"
+
+            # Create a VISIBLE folder INSIDE the main data folder for these databases
+            session_db_folder = self.base_folder / "Session_Databases"
+            session_db_folder.mkdir(parents=True, exist_ok=True)
+
+            full_db_path = session_db_folder / db_filename
+            # ---------------------------------------------------------
+
             self.render_timer.start()
 
             self.lbl_started.setText("WAITING FOR DATA...")
@@ -1735,9 +1756,8 @@ class VentilatorApp(QMainWindow):
             self.btn_action.setText("STOP RECORDING")
             self.btn_action.setStyleSheet("background-color: #cc3300; color: white; border-radius: 5px;")
 
-            # 1. Main Worker
-            pid = self.input_id.text().strip()
-            self.worker = VentilatorWorker(pid)
+            # 1. Main Worker (Pass the new DB path)
+            self.worker = VentilatorWorker(pid, full_db_path)
             self.worker.sig_status_update.connect(self.update_status)
             self.worker.sig_settings_msg.connect(self.update_mode_display)
             self.worker.sig_breath_seq.connect(self.update_breath_index)
@@ -1748,9 +1768,8 @@ class VentilatorApp(QMainWindow):
             self.worker.sig_connection_restored.connect(self.on_connection_restored)
             self.worker.start()
 
-            # 2. Snapshot Worker
-            db_path = self.worker.system_folder / "syncrone.db"
-            self.snapshot_worker = SnapshotWorker(db_path, self.base_folder, pid)
+            # 2. Snapshot Worker (Pass the SAME DB path)
+            self.snapshot_worker = SnapshotWorker(full_db_path, self.base_folder, pid)
             self.snapshot_worker.start()
 
             self.last_pkt_time = time.monotonic()
