@@ -8,6 +8,7 @@ import sqlite3
 import traceback
 import os
 import json
+import gc  # Required for explicit memory management in long-running threads
 import code  # Required for the embedded console
 from io import StringIO  # Required to capture print() output
 from pathlib import Path
@@ -608,6 +609,8 @@ class SnapshotWorker(QThread):
             try:
                 if HAS_EDF_LIB:
                     self.generate_edf()
+                    # FORCE CLEANUP after big allocation
+                    gc.collect()
                 else:
                     pass
             except Exception as e:
