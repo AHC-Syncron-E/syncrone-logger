@@ -38,7 +38,7 @@ jobs:
           pip install pyside6 numpy pyqtgraph pyserial edfio
           # We install these so Nuitka can see them if needed, 
           # but we will mostly rely on raw injection for Debug.
-          pip install wandb psutil
+          pip install wandb psutil setuptools importlib_metadata
 
       - name: Set App Version
         run: |
