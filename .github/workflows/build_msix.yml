@@ -64,15 +64,38 @@ jobs:
             "--noinclude-unittest-mode=nofollow",
             "--noinclude-setuptools-mode=nofollow",
             "--noinclude-IPython-mode=nofollow",
-            # CRITICAL: We tell Nuitka to NEVER look inside telemetry libs.
-            # This keeps build time fast (~20-30 mins) and avoids analysis errors.
-            "--include-package=zoneinfo",
+            
+            # --- 1. COMPLIANCE FIXES (The "Invisible" Standard Libs) ---
+            # Based on your Deep Scan results:
+            "--include-package=asyncio",            # Critical: WandB uses async core
+            "--include-package=concurrent",         # Critical: Threading/Futures
+            "--include-package=uuid",               # Run IDs
+            "--include-package=netrc",              # Authentication
+            "--include-package=xml",                # config parsing
+            "--include-package=unittest",           # WandB uses unittest.mock
+            "--include-package=queue",              # Threading queues
+            "--include-package=ssl",                # HTTPS support for requests
+            "--include-package=email",              # MIME handling for requests
+            "--include-package=html",               # Reporting
+            "--include-package=http",               # Networking
+            "--include-package=ctypes",             # System calls
+            
+            # These fixes from previous attempts remain valid:
+            "--include-package=zoneinfo",           
+            "--include-package=colorsys",           
+            "--include-package=setuptools",         # For pkg_resources
+            "--include-package=importlib_metadata", 
+            
+            # --- 2. EXCLUDE & RUNTIME FIXES ---
             "--nofollow-import-to=wandb",
             "--nofollow-import-to=psutil",
+            # CRITICAL: Allows 'import wandb' to work despite the exclusion above
+            "--no-deployment-flag=excluded-module-usage",
+            
             "--windows-icon-from-ico=icon.ico",
             "--windows-console-mode=disable",
             "--output-dir=build",
-            # SYNTAX FIX: No single quotes inside the strings
+            # SYNTAX FIX: No single quotes inside these strings
             "--company-name=Autonomous Healthcare Inc.",
             "--product-name=Syncron-E Waveform Recorder",
             "--file-version=${{ env.APP_VERSION }}",
