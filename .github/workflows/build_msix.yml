@@ -36,6 +36,8 @@ jobs:
         run: |
           pip install nuitka zstandard
           pip install pyside6 numpy pyqtgraph pyserial edfio
+          # We install these so Nuitka can see them if needed, 
+          # but we will mostly rely on raw injection for Debug.
           pip install wandb psutil
 
       - name: Set App Version
@@ -49,9 +51,9 @@ jobs:
           $ver = "${{ env.APP_VERSION }}"
           (Get-Content main.py) -replace 'APP_VERSION = ".*?"', "APP_VERSION = `"$ver`"" | Set-Content main.py
 
+      # --- 1. COMPILE (Fast Mode) ---
       - name: Compile Standalone (${{ matrix.build_type }})
         run: |
-          # Define base flags
           $nuitka_args = @(
             "--standalone",
             "--assume-yes-for-downloads",
@@ -62,10 +64,14 @@ jobs:
             "--noinclude-unittest-mode=nofollow",
             "--noinclude-setuptools-mode=nofollow",
             "--noinclude-IPython-mode=nofollow",
+            # CRITICAL: We tell Nuitka to NEVER look inside telemetry libs.
+            # This keeps build time fast (~20-30 mins) and avoids analysis errors.
+            "--nofollow-import-to=wandb",
+            "--nofollow-import-to=psutil",
             "--windows-icon-from-ico=icon.ico",
             "--windows-console-mode=disable",
             "--output-dir=build",
-            # FIXED: Removed single quotes inside the strings
+            # SYNTAX FIX: No single quotes inside the strings
             "--company-name=Autonomous Healthcare Inc.",
             "--product-name=Syncron-E Waveform Recorder",
             "--file-version=${{ env.APP_VERSION }}",
@@ -73,22 +79,24 @@ jobs:
             "--include-data-file=ahc_logo.svg=ahc_logo.svg"
           )
 
-          # LOGIC: If Release, STRIP telemetry. If Debug, INCLUDE it.
-          if ("${{ matrix.build_type }}" -eq "Release") {
-            Write-Host "Configuring RELEASE build: Stripping Telemetry..."
-            $nuitka_args += "--nofollow-import-to=wandb"
-            $nuitka_args += "--nofollow-import-to=psutil"
-          } else {
-            Write-Host "Configuring DEBUG build: Including Telemetry..."
-          }
-
-          # Execute Nuitka
           python -m nuitka $nuitka_args main.py
 
           # Prepare payload folder
           if (Test-Path "payload") { Remove-Item "payload" -Recurse -Force }
           Move-Item -Path "build\main.dist" -Destination "payload"
 
+      # --- 2. INJECT LIBS (Debug Only) ---
+      # This puts the raw Python files into the EXE folder so import works perfectly.
+      - name: Inject Telemetry Libs (Debug Only)
+        if: matrix.build_type == 'Debug'
+        run: |
+          Write-Host "Installing raw wandb and psutil into payload folder..."
+          # Install directly to payload. --no-deps for psutil to keep it clean.
+          pip install psutil --target payload --no-user --upgrade --no-deps
+          # Install wandb WITH dependencies (requests, etc) so nothing is missing.
+          pip install wandb --target payload --no-user --upgrade
+
+      # --- 3. SIGN EVERYTHING (Includes new injected libs) ---
       - name: Sign EVERYTHING (DLLs, PYDs, EXEs)
         uses: azure/artifact-signing-action@v1
         with:
@@ -99,6 +107,7 @@ jobs:
           signing-account-name: ${{ secrets.AZURE_CODE_SIGNING_NAME }}
           certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE_NAME }}
           files-folder: payload
+          # CRITICAL: Recursive scan ensures injected 'psutil' binaries are signed
           files-folder-filter: "*.exe,*.dll,*.pyd"
           files-folder-recurse: true
           file-digest: sha256
@@ -111,7 +120,6 @@ jobs:
           $assetsDir = "$payloadDir\Assets"
           New-Item -ItemType Directory -Force -Path $assetsDir
 
-          # Generate Assets
           magick "ahclogo_transp_notxt_square.png" -resize 44x44   "$assetsDir\Square44x44Logo.png"
           magick "ahclogo_transp_notxt_square.png" -resize 150x150 "$assetsDir\Square150x150Logo.png"
           magick "ahclogo_transp_notxt_square.png" -resize 50x50   "$assetsDir\StoreLogo.png"
@@ -123,7 +131,7 @@ jobs:
               magick "ahclogo_transp_notxt_square.png" -resize "${size}x${size}" "$assetsDir\Square44x44Logo.targetsize-${size}_altform-unplated.png"
           }
 
-          # 3. DIFFERENTIATE MANIFEST IDENTITY FOR DEBUG
+          # DEBUG IDENTITY SWITCHING
           $identityName = "${{ env.APP_NAME }}"
           $displayName = "Syncron-E Waveform Recorder"
           
@@ -178,7 +186,7 @@ jobs:
               $makeappx = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\makeappx.exe" | Select-Object -First 1
           }
           
-          # 4. DISTINCT OUTPUT FILENAME
+          # Distinct Filename
           $filename = "Syncron-E_${{ env.APP_VERSION }}_${{ matrix.build_type }}.msix"
           & $makeappx pack /d payload /p $filename /v
 
