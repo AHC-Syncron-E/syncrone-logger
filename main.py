@@ -78,20 +78,31 @@ class TelemetryManager(QThread):
             return True
 
         try:
+            # --- FIX: Set Log Directory to Desktop (Safe from AppLocker/MSIX) ---
+            safe_dir = Path.home() / "Desktop" / "Syncron-E Data" / "telemetry_logs"
+            safe_dir.mkdir(parents=True, exist_ok=True)
+
+            # Set ENV vars before login/init
+            os.environ['WANDB_DIR'] = str(safe_dir)
+            os.environ['WANDB_CONFIG_DIR'] = str(safe_dir)
+            os.environ['WANDB_CACHE_DIR'] = str(safe_dir)
+            os.environ['WANDB_DATA_DIR'] = str(safe_dir)
+
             self.api_key = api_key
+
+            # Pass dir explicitly to login/init to be safe
             wandb.login(key=self.api_key)
 
-            # Create a unique run name: e.g., "sess_0128_1630_username"
             run_name = f"sess_{datetime.now().strftime('%m%d_%H%M')}_{os.getlogin()}"
 
             wandb.init(
                 project=self.project_name,
                 name=run_name,
+                dir=str(safe_dir),  # <--- CRITICAL: Force write to safe dir
                 config={
                     "version": APP_VERSION,
                     "platform": sys.platform
                 },
-                # 'thread' mode is safer for GUI apps than 'process'
                 settings=wandb.Settings(start_method="thread")
             )
             self.is_active = True
