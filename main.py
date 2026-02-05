@@ -622,80 +622,101 @@ class SnapshotWorker(QThread):
 
     def generate_edf(self):
         now_dt = datetime.now()
+        # Create cutoff for 1 hour of data
         cutoff = (now_dt - timedelta(hours=1)).isoformat()
 
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
 
-        # Query all samples
+        # 1. OPTIMIZATION: Count rows first to ensure we have enough data (avoid overhead)
+        # Optional check, but good for performance
+        count_query = "SELECT COUNT(id) FROM waveforms WHERE timestamp > ?"
+        cursor.execute(count_query, (cutoff,))
+        count = cursor.fetchone()[0]
+
+        fs = 50
+        if count < fs:
+            conn.close()
+            return
+
+        # 2. Main Query - Executed normally
         query = """
                 SELECT parsed_pressure, parsed_flow, vent_mode, breath_index
                 FROM waveforms
                 WHERE timestamp > ?
-                ORDER BY id ASC \
+                ORDER BY id ASC
                 """
         cursor.execute(query, (cutoff,))
-        rows = cursor.fetchall()
-        conn.close()
 
-        # Truncation: Ensure integer seconds of data
-        fs = 50
-        num_samples = len(rows)
-        if num_samples < fs:
-            return
+        # --- MEMORY FIX: STREAMING PROCESSING ---
+        # Instead of rows = cursor.fetchall(), we iterate.
 
-        remainder = num_samples % fs
-        if remainder > 0:
-            rows = rows[:-remainder]
-
-        # Prepare signals
-        pressures = np.array([r[0] if r[0] is not None else 0.0 for r in rows], dtype=np.float32)
-        flows = np.array([r[1] if r[1] is not None else 0.0 for r in rows], dtype=np.float32)
-
-        p_sig = EdfSignal(pressures, sampling_frequency=fs, label="Pressure", physical_dimension="cmH2O")
-        f_sig = EdfSignal(flows, sampling_frequency=fs, label="Flow", physical_dimension="L/min")
-
-        # --- MODE STANDARDIZATION LOGIC ---
-        MODE_MAPPINGS = {
-            "VC A/C": "VCV",
-            "VC": "VCV",
-            "VC+ A/C": "VCV",
-            "VC+": "VCV",
-            "PC A/C": "PCV",
-            "PC": "PCV"
-        }
-
-        def get_clean_mode(raw_s):
-            if not raw_s: return "Unknown"
-
-            # 1. Check strict mapping first
-            # We strip whitespace just in case, but keep case sensitivity
-            # (or use .upper() if you expect casing variance)
-            check_key = raw_s.strip()
-            if check_key in MODE_MAPPINGS:
-                return MODE_MAPPINGS[check_key]
-
-            # 2. Fallback to strict sanitizer
-            # (Removes + / characters etc)
-            return "".join(c for c in raw_s if c.isalnum() or c in " -_.")
-
+        # Pre-allocate lists. In a more advanced fix we'd use pre-sized numpy arrays,
+        # but standard lists are fine if we don't hold the DB rows (tuples) in memory.
+        pressures = []
+        flows = []
         annotations = []
+
         last_idx = None
 
-        for i, row in enumerate(rows):
-            raw_mode = row[2] if row[2] else "Unknown"
-            current_idx = row[3]
+        # Process in chunks of 5000 rows to keep memory footprint tiny
+        while True:
+            batch = cursor.fetchmany(5000)
+            if not batch:
+                break
 
-            if current_idx is not None and current_idx != last_idx:
-                onset_sec = i / float(fs)
+            for row in batch:
+                # Row Structure: 0=Press, 1=Flow, 2=Mode, 3=BreathIdx
 
-                # Use the new mapping function
-                final_mode_str = get_clean_mode(raw_mode)
-                text = f"{final_mode_str}-{current_idx}"
+                # Append primitive floats (low memory overhead)
+                p_val = row[0] if row[0] is not None else 0.0
+                f_val = row[1] if row[1] is not None else 0.0
+                pressures.append(p_val)
+                flows.append(f_val)
 
-                annot = EdfAnnotation(onset=onset_sec, duration=None, text=text)
-                annotations.append(annot)
-                last_idx = current_idx
+                # Process Annotations on the fly
+                raw_mode = row[2] if row[2] else "Unknown"
+                current_idx = row[3]
+
+                if current_idx is not None and current_idx != last_idx:
+                    # Calculate onset: current sample count / frequency
+                    onset_sec = len(pressures) / float(fs)
+
+                    # Logic copied from your existing mode sanitizer
+                    if raw_mode.strip() in ["VC A/C", "VC", "VC+ A/C", "VC+"]:
+                        final_mode_str = "VCV"
+                    elif raw_mode.strip() in ["PC A/C", "PC"]:
+                        final_mode_str = "PCV"
+                    else:
+                        final_mode_str = "".join(c for c in raw_mode if c.isalnum() or c in " -_.")
+
+                    text = f"{final_mode_str}-{current_idx}"
+                    annot = EdfAnnotation(onset=onset_sec, duration=None, text=text)
+                    annotations.append(annot)
+                    last_idx = current_idx
+
+        conn.close()
+
+        # 3. Truncation Logic (Ensure integer seconds)
+        num_samples = len(pressures)
+        remainder = num_samples % fs
+        if remainder > 0:
+            # Slice off the remainder from the end
+            pressures = pressures[:-remainder]
+            flows = flows[:-remainder]
+
+        # 4. Convert to Numpy for EDF writing (Fast)
+        # Note: We use float32 to save 50% RAM compared to default float64
+        p_arr = np.array(pressures, dtype=np.float32)
+        f_arr = np.array(flows, dtype=np.float32)
+
+        # Clear large lists immediately to free memory before EDF creation
+        del pressures
+        del flows
+
+        # Create Signals
+        p_sig = EdfSignal(p_arr, sampling_frequency=fs, label="Pressure", physical_dimension="cmH2O")
+        f_sig = EdfSignal(f_arr, sampling_frequency=fs, label="Flow", physical_dimension="L/min")
 
         # Build EDF
         if annotations:
@@ -706,13 +727,14 @@ class SnapshotWorker(QThread):
         # Patient ID Sanitization
         clean_pid = self.patient_id.strip().replace(" ", "_")
         if not clean_pid: clean_pid = "X"
-
         edf.patient = Patient(name=clean_pid)
 
+        # Date/Time setup
         start_time_obj = now_dt - timedelta(hours=1)
         edf.startdate = start_time_obj.date()
         edf.starttime = start_time_obj.time()
 
+        # File Operations
         file_ts = now_dt.strftime("%Y%m%d_%H%M%S")
         filename = f"{clean_pid}_{file_ts}_1H.edf"
         final_path = self.output_folder / filename
@@ -735,10 +757,11 @@ class SnapshotWorker(QThread):
             if temp_path.exists():
                 os.remove(temp_path)
 
-        del pressures
-        del flows
-        del rows
+        # Final cleanup
+        del p_arr
+        del f_arr
         del edf
+        gc.collect()
 
 
 # -----------------------------------------------------------------------------
@@ -1714,10 +1737,24 @@ class VentilatorApp(QMainWindow):
             self.btn_action.setToolTip("You must enter a Patient ID before recording can begin.")
 
     def check_disk_space(self):
+        """
+        Robust disk space check.
+        If specific folder check fails, tries drive root.
+        If both fail, returns a 'safe' large value (1TB) rather than blocking the user.
+        """
         try:
+            # 1. Try checking the specific data folder
+            if not self.base_folder.exists():
+                self.base_folder.mkdir(parents=True, exist_ok=True)
             return shutil.disk_usage(str(self.base_folder)).free
-        except:
-            return 0
+        except Exception:
+            try:
+                # 2. Fallback: Try checking the drive anchor (e.g., "C:\")
+                return shutil.disk_usage(str(self.base_folder.anchor)).free
+            except Exception:
+                # 3. Failsafe: If OS refuses to report stats, assume 1TB free
+                # so we don't block the user from recording.
+                return 1024 * 1024 * 1024 * 1024
 
     def handle_worker_error(self, msg):
         self.worker.stop()
