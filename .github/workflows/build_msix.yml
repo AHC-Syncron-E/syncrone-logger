@@ -66,6 +66,7 @@ jobs:
             "--noinclude-IPython-mode=nofollow",
             # CRITICAL: We tell Nuitka to NEVER look inside telemetry libs.
             # This keeps build time fast (~20-30 mins) and avoids analysis errors.
+            "--include-package=zoneinfo",
             "--nofollow-import-to=wandb",
             "--nofollow-import-to=psutil",
             "--windows-icon-from-ico=icon.ico",
