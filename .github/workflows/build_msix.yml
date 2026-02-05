@@ -10,21 +10,24 @@ permissions:
   id-token: write
 
 env:
-  # CRITICAL: This MUST match the "Subject" of your Azure Signing Certificate exactly.
   PUBLISHER_NAME: "CN=Autonomous Healthcare Inc., O=Autonomous Healthcare Inc., L=Santa Clara, S=California, C=US"
   APP_NAME: "SyncronE"
-  # Base version (Major.Minor.Patch). The 4th digit will be the GitHub Run Number.
   VERSION_PREFIX: "1.0.0"
 
 jobs:
   build-msix:
+    name: Build ${{ matrix.build_type }} MSIX
     runs-on: windows-latest
+
+    # 1. DEFINE THE MATRIX STRATEGY
+    strategy:
+      matrix:
+        build_type: [Release, Debug]
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # --- 1. Setup Environment ---
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
@@ -34,50 +37,62 @@ jobs:
         run: |
           pip install nuitka zstandard
           pip install pyside6 numpy pyqtgraph pyserial edfio
+          # Install telemetry libs regardless, Nuitka decides whether to include them based on flags
+          pip install wandb psutil
 
-      # --- NEW: Set Dynamic Version ---
-      # Combines "1.0.0" + "RunNumber" (e.g. 45) -> "1.0.0.45"
       - name: Set App Version
         run: |
           $ver = "${{ env.VERSION_PREFIX }}.${{ github.run_number }}"
           echo "APP_VERSION=$ver" | Out-File -FilePath $env:GITHUB_ENV -Append
-          Write-Host "Building Version: $ver"
+          Write-Host "Building Version: $ver (${{ matrix.build_type }})"
 
-      # --- Inject Version into Python Source ---
       - name: Inject Version into Code
         run: |
           $ver = "${{ env.APP_VERSION }}"
-          # Use Regex (-replace) to match 'APP_VERSION = "..."' regardless of what is inside the quotes
           (Get-Content main.py) -replace 'APP_VERSION = ".*?"', "APP_VERSION = `"$ver`"" | Set-Content main.py
 
-      # --- 2. Compile with Nuitka ---
-      - name: Compile Standalone
+      # 2. COMPILE WITH CONDITIONAL FLAGS
+      - name: Compile Standalone (${{ matrix.build_type }})
         run: |
-          python -m nuitka --standalone `
-            --assume-yes-for-downloads `
-            --enable-plugin=pyside6 `
-            --include-module=PySide6.QtOpenGL `
-            --include-module=PySide6.QtOpenGLWidgets `
-            --noinclude-pytest-mode=nofollow `
-            --noinclude-unittest-mode=nofollow `
-            --noinclude-setuptools-mode=nofollow `
-            --noinclude-IPython-mode=nofollow `
-            --nofollow-import-to=wandb `
-            --nofollow-import-to=psutil `
-            --windows-icon-from-ico=icon.ico `
-            --windows-console-mode=disable `
-            --output-dir=build `
-            --company-name="Autonomous Healthcare Inc." `
-            --product-name="Syncron-E Waveform Recorder" `
-            --file-version="${{ env.APP_VERSION }}" `
-            --product-version="${{ env.APP_VERSION }}" `
-            --include-data-file=ahc_logo.svg=ahc_logo.svg `
-            main.py
+          # Define base flags
+          $nuitka_args = @(
+            "--standalone",
+            "--assume-yes-for-downloads",
+            "--enable-plugin=pyside6",
+            "--include-module=PySide6.QtOpenGL",
+            "--include-module=PySide6.QtOpenGLWidgets",
+            "--noinclude-pytest-mode=nofollow",
+            "--noinclude-unittest-mode=nofollow",
+            "--noinclude-setuptools-mode=nofollow",
+            "--noinclude-IPython-mode=nofollow",
+            "--windows-icon-from-ico=icon.ico",
+            "--windows-console-mode=disable",
+            "--output-dir=build",
+            "--company-name='Autonomous Healthcare Inc.'",
+            "--product-name='Syncron-E Waveform Recorder'",
+            "--file-version='${{ env.APP_VERSION }}'",
+            "--product-version='${{ env.APP_VERSION }}'",
+            "--include-data-file=ahc_logo.svg=ahc_logo.svg"
+          )
 
-          # Rename the dist folder to something clean for packaging
+          # LOGIC: If Release, STRIP telemetry. If Debug, INCLUDE it.
+          if ("${{ matrix.build_type }}" -eq "Release") {
+            Write-Host "Configuring RELEASE build: Stripping Telemetry..."
+            $nuitka_args += "--nofollow-import-to=wandb"
+            $nuitka_args += "--nofollow-import-to=psutil"
+          } else {
+            Write-Host "Configuring DEBUG build: Including Telemetry..."
+            # We specifically DO NOT add the nofollow flags here
+            # Nuitka will detect the imports in main.py and include them automatically
+          }
+
+          # Execute Nuitka
+          python -m nuitka $nuitka_args main.py
+
+          # Prepare payload folder
+          if (Test-Path "payload") { Remove-Item "payload" -Recurse -Force }
           Move-Item -Path "build\main.dist" -Destination "payload"
 
-      # --- 3. Sign the Inner Executable ---
       - name: Sign EVERYTHING (DLLs, PYDs, EXEs)
         uses: azure/artifact-signing-action@v1
         with:
@@ -100,41 +115,41 @@ jobs:
           $assetsDir = "$payloadDir\Assets"
           New-Item -ItemType Directory -Force -Path $assetsDir
 
-          # A. Generate Required PNGs
-          # Source: ahclogo_transp_notxt_square.png
-          
-          # 1. Base Manifest Assets (The anchors)
+          # Generate Assets
           magick "ahclogo_transp_notxt_square.png" -resize 44x44   "$assetsDir\Square44x44Logo.png"
           magick "ahclogo_transp_notxt_square.png" -resize 150x150 "$assetsDir\Square150x150Logo.png"
           magick "ahclogo_transp_notxt_square.png" -resize 50x50   "$assetsDir\StoreLogo.png"
           magick "ahclogo_transp_notxt_square.png" -resize 150x150 "$assetsDir\SplashScreen.png"
 
-          # 2. Generate Target Sizes for Taskbar (16, 24, 32, 48, 256)
-          # We generate BOTH the standard (plated lookup) and unplated (transparent) versions.
-          # This ensures Windows finds the resource "node" first, then switches to the unplated variant.
-          
           $sizes = 16, 24, 32, 48, 256
           foreach ($size in $sizes) {
-              # Standard (Anchor)
               magick "ahclogo_transp_notxt_square.png" -resize "${size}x${size}" "$assetsDir\Square44x44Logo.targetsize-${size}.png"
-              
-              # Unplated (The one we actually want shown)
               magick "ahclogo_transp_notxt_square.png" -resize "${size}x${size}" "$assetsDir\Square44x44Logo.targetsize-${size}_altform-unplated.png"
           }
 
-          # B. Generate AppxManifest.xml
-          # Note: Using ${{ env.APP_VERSION }} for the Identity Version
+          # 3. DIFFERENTIATE MANIFEST IDENTITY FOR DEBUG
+          # If we don't change the Identity Name, you can't install both side-by-side easily.
+          # Ideally, for debug, we append "Debug" to the name.
+          
+          $identityName = "${{ env.APP_NAME }}"
+          $displayName = "Syncron-E Waveform Recorder"
+          
+          if ("${{ matrix.build_type }}" -eq "Debug") {
+             $identityName = "${{ env.APP_NAME }}.Debug"
+             $displayName = "Syncron-E (DEBUG)"
+          }
+
           $manifestContent = @"
           <?xml version="1.0" encoding="utf-8"?>
           <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10" 
                    xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10" 
                    xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities">
-            <Identity Name="${{ env.APP_NAME }}" 
+            <Identity Name="$identityName" 
                       Publisher="${{ env.PUBLISHER_NAME }}" 
                       Version="${{ env.APP_VERSION }}" 
                       ProcessorArchitecture="x64" />
             <Properties>
-              <DisplayName>Syncron-E Waveform Recorder</DisplayName>
+              <DisplayName>$displayName</DisplayName>
               <PublisherDisplayName>Autonomous Healthcare Inc.</PublisherDisplayName>
               <Logo>Assets\StoreLogo.png</Logo>
             </Properties>
@@ -150,7 +165,7 @@ jobs:
             <Applications>
               <Application Id="SyncronEApp" Executable="main.exe" EntryPoint="Windows.FullTrustApplication">
                 <uap:VisualElements 
-                  DisplayName="Syncron-E Waveform Recorder" 
+                  DisplayName="$displayName" 
                   Description="Syncron-E Waveform Recorder Application" 
                   BackgroundColor="transparent" 
                   Square150x150Logo="Assets\Square150x150Logo.png" 
@@ -163,7 +178,6 @@ jobs:
           "@
           Set-Content -Path "$payloadDir\AppxManifest.xml" -Value $manifestContent
 
-      # --- 5. Pack MSIX ---
       - name: Create MSIX Package
         run: |
           $makeappx = "C:\Program Files (x86)\Windows Kits\10\bin\10.0.22621.0\x64\makeappx.exe"
@@ -171,10 +185,10 @@ jobs:
               $makeappx = Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\makeappx.exe" | Select-Object -First 1
           }
           
-          # Using dynamic version in filename as well for clarity
-          & $makeappx pack /d payload /p "Syncron-E_${{ env.APP_VERSION }}.msix" /v
+          # 4. DISTINCT OUTPUT FILENAME
+          $filename = "Syncron-E_${{ env.APP_VERSION }}_${{ matrix.build_type }}.msix"
+          & $makeappx pack /d payload /p $filename /v
 
-      # --- 6. Sign the MSIX ---
       - name: Sign MSIX Package
         uses: azure/artifact-signing-action@v1
         with:
@@ -185,15 +199,13 @@ jobs:
           signing-account-name: ${{ secrets.AZURE_CODE_SIGNING_NAME }}
           certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE_NAME }}
           files-folder: .
-          # Matches the new filename format
           files-folder-filter: "Syncron-E_*.msix"
           file-digest: sha256
           timestamp-rfc3161: http://timestamp.acs.microsoft.com
           timestamp-digest: sha256
 
-      # --- 7. Upload Artifact ---
       - name: Upload MSIX
         uses: actions/upload-artifact@v4
         with:
-          name: Syncron-E-MSIX
+          name: Syncron-E-MSIX-${{ matrix.build_type }}
           path: "Syncron-E_*.msix"
