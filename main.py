@@ -1,10 +1,35 @@
 import sys
 import os
 
-# CRITICAL: Prevent memory leaks from buffered stdout/stderr in frozen apps
+# -----------------------------------------------------------------------------
+# CRITICAL: MSIX/Nuitka "Zombie Pipe" Fix
+# -----------------------------------------------------------------------------
+# In "frozen" Windows apps (no console), C-level libraries (Qt, NumPy) write to
+# file descriptors 1 (stdout) and 2 (stderr). Since no console reads them,
+# the OS buffers this text in RAM indefinitely, causing a linear memory leak.
+# We must redirect these FDs to "NUL" (the OS bit-bucket).
 if getattr(sys, 'frozen', False):
-    sys.stdout = open(os.devnull, 'w')
-    sys.stderr = open(os.devnull, 'w')
+    try:
+        # 1. Silence Qt's internal chatty logging
+        os.environ["QT_LOGGING_RULES"] = "*=false"
+
+        # 2. Open the OS "Bit Bucket"
+        null_fd = os.open("NUL", os.O_WRONLY)
+
+        # 3. Force redirection of C-level File Descriptors (1=stdout, 2=stderr)
+        os.dup2(null_fd, 1)
+        os.dup2(null_fd, 2)
+
+        # 4. Redirect Python-level objects
+        sys.stdout = os.fdopen(1, 'w', buffering=1)
+        sys.stderr = os.fdopen(2, 'w', buffering=1)
+    except Exception:
+        # Fallback for strict sandboxes
+        try:
+            sys.stdout = open(os.devnull, 'w')
+            sys.stderr = open(os.devnull, 'w')
+        except:
+            pass
 
 import time
 import math
@@ -42,15 +67,20 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QLineEdit, QComboBox, QSizePolicy, QDialog, QDialogButtonBox,
                                QGridLayout, QPlainTextEdit, QInputDialog)
 from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer, QEvent
-from PySide6.QtGui import QFont, QIcon, QColor, QCloseEvent, QPixmap, QMouseEvent, QTextCursor
+from PySide6.QtGui import (QFont, QIcon, QColor, QCloseEvent, QPixmap,
+                           QMouseEvent, QTextCursor, QPixmapCache)
 
 # Graphing
 import pyqtgraph as pg
 
+# FORCE Software Rasterization (Safety against OpenGL leaks in MSIX)
+pg.setConfigOption('useOpenGL', False)
+pg.setConfigOption('enableExperimental', False)
+
 # -----------------------------------------------------------------------------
 # GLOBAL CONSTANTS
 # -----------------------------------------------------------------------------
-APP_VERSION = "1.4.1"  # Bumped version for Auto-Lock
+APP_VERSION = "1.4.2"  # Bumped for Memory Fixes
 DEBUG_PIN = "REDACTED_PIN"  # PIN required to access internal debugger
 
 # -----------------------------------------------------------------------------
@@ -228,29 +258,6 @@ class AboutDialog(QDialog):
         layout.addStretch()
         layout.addWidget(self.btn_debug)
         layout.addWidget(QDialogButtonBox(QDialogButtonBox.Ok, accepted=self.accept))
-
-    def activate_telemetry(self):
-        # 1. Security Check
-        text, ok = QInputDialog.getText(self, "Admin Access", "Enter PIN:", QLineEdit.Password)
-        if not ok: return
-        if text != DEBUG_PIN:  # REDACTED_PIN
-            QMessageBox.warning(self, "Access Denied", "Incorrect PIN.")
-            return
-
-        # 2. Get API Key
-        key, ok = QInputDialog.getText(self, "WandB Setup", "Enter WandB API Key:", QLineEdit.Password)
-        if ok and key:
-            self.btn_telemetry.setText("Connecting...")
-            self.btn_telemetry.repaint()
-
-            # 3. Init Telemetry
-            if self.parent_window.telemetry.setup(key):
-                self.parent_window.telemetry.start_logging()
-                self.accept()
-                QMessageBox.information(self.parent_window, "Connected", "Telemetry is now streaming to WandB.")
-            else:
-                self.btn_telemetry.setText("Enable WandB Telemetry")
-                QMessageBox.critical(self, "Error", "Connection Failed.\nCheck internet or API key.")
 
     def launch_shell(self):
         text, ok = QInputDialog.getText(self, "Restricted Access",
@@ -460,12 +467,26 @@ class BreathMarker:
 
 
 class BreathMarkerManager:
+    # SAFETY VALVE: Limit markers to prevent accumulation in case of logic drift
+    MAX_MARKERS = 600
+
     def __init__(self, plot_item):
         self.plot_item = plot_item
         self.markers = {}
 
     def add_marker(self, seq_num, y_offset=0):
         if seq_num in self.markers: return
+
+        # Enforce Cap
+        if len(self.markers) >= self.MAX_MARKERS:
+            # Drop the oldest marker (safe fallback)
+            try:
+                oldest_seq = next(iter(self.markers))
+                self.markers[oldest_seq].destroy()
+                del self.markers[oldest_seq]
+            except StopIteration:
+                pass
+
         try:
             marker = BreathMarker(self.plot_item, seq_num, y_offset)
             self.markers[seq_num] = marker
@@ -1215,12 +1236,16 @@ class VentilatorApp(QMainWindow):
 
 
     def force_maintenance(self):
-        # 1. Force Python to reclaim circular references
-        gc.collect()
+        try:
+            # 1. Force Python to reclaim circular references
+            gc.collect()
 
-        # 2. Optional: Empty Qt's internal memory caches
-        # (Only if you really need to squeeze bytes, usually gc.collect is enough)
-        QPixmap.cache().clear()
+            # 2. Empty Qt's internal memory caches
+            # CRITICAL FIX: Use QPixmapCache (static class), NOT QPixmap.cache() instance method
+            QPixmapCache.clear()
+        except Exception as e:
+            # Swallow error to prevent timer from dying or leaking stack traces
+            print(f"Maintenance Error: {e}")
 
     def prevent_sleep(self):
         try:
@@ -1576,9 +1601,7 @@ class VentilatorApp(QMainWindow):
         dlg.exec()
 
     def closeEvent(self, event: QCloseEvent):
-        # Ensure thread stops cleanly on exit
-        if self.telemetry.isRunning():
-            self.telemetry.stop_logging()
+        # FIX: Removed reference to undefined self.telemetry
         if self.is_logging or self.is_locked:
             msg = "Recording in progress!" if self.is_logging else "App is LOCKED."
             QMessageBox.warning(self, "Cannot Close", f"{msg}\nPlease stop recording/unlock first.")
