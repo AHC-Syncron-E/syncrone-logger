@@ -1,4 +1,11 @@
 import sys
+import os
+
+# CRITICAL: Prevent memory leaks from buffered stdout/stderr in frozen apps
+if getattr(sys, 'frozen', False):
+    sys.stdout = open(os.devnull, 'w')
+    sys.stderr = open(os.devnull, 'w')
+
 import time
 import math
 import ctypes
@@ -6,7 +13,6 @@ import re
 import shutil
 import sqlite3
 import traceback
-import os
 import json
 import gc  # Required for explicit memory management in long-running threads
 import code  # Required for the embedded console
