@@ -425,84 +425,104 @@ class DatabaseManager:
         if self.conn: self.conn.close()
 
 
-# -----------------------------------------------------------------------------
-# 2. MARKER MANAGEMENT (Synchronized)
-# -----------------------------------------------------------------------------
-class BreathMarker:
-    def __init__(self, plot_item, seq_num, y_offset=0):
-        self.plot_item = plot_item
-        self.seq_num = seq_num
-        self.x_pos = -0.02
-
-        self.line = pg.InfiniteLine(pos=self.x_pos, angle=90, pen=pg.mkPen('#555', width=1, style=Qt.DashLine))
-        self.text = pg.TextItem(text=f"#{seq_num}", anchor=(0, 1), color="#ffa500")
-        self.text.setPos(self.x_pos, y_offset)
-
-        self.plot_item.addItem(self.line)
-        self.plot_item.addItem(self.text)
-
-    def shift(self, distance):
-        self.x_pos += distance
-        self.line.setPos(self.x_pos)
-        self.text.setPos(self.x_pos, self.text.y())
-        return self.x_pos
-
-    def destroy(self):
-        try:
-            # 1. Remove from scene (Visual removal)
-            if self.line.scene():
-                self.plot_item.removeItem(self.line)
-            if self.text.scene():
-                self.plot_item.removeItem(self.text)
-
-            # 2. CRITICAL FIX: Delete the C++ object immediately
-            self.line.deleteLater()
-            self.text.deleteLater()
-
-            # 3. Clear Python references
-            self.line = None
-            self.text = None
-        except:
-            pass
-
-
-class BreathMarkerManager:
-    # SAFETY VALVE: Limit markers to prevent accumulation in case of logic drift
-    MAX_MARKERS = 600
+class BreathMarkerPool:
+    """
+    Fixed-size pool of reusable breath markers.
+    Eliminates create/destroy cycle that leaks under Nuitka+Shiboken.
+    """
+    POOL_SIZE = 20  # Max visible markers on screen at once
 
     def __init__(self, plot_item):
         self.plot_item = plot_item
-        self.markers = {}
+        self.pool = []
+        self.active = {}  # seq_num -> pool_index
+
+        # Pre-allocate all markers ONCE at startup
+        for i in range(self.POOL_SIZE):
+            line = pg.InfiniteLine(pos=-999, angle=90,
+                                   pen=pg.mkPen('#555', width=1, style=Qt.DashLine))
+            text = pg.TextItem(text="", anchor=(0, 1), color="#ffa500")
+            text.setPos(-999, 0)
+
+            # Add to scene but hide off-screen
+            plot_item.addItem(line)
+            plot_item.addItem(text)
+            line.setVisible(False)
+            text.setVisible(False)
+
+            self.pool.append({
+                'line': line,
+                'text': text,
+                'x_pos': -999,
+                'in_use': False,
+                'seq_num': None
+            })
+
+    def _get_free_slot(self):
+        """Get an unused slot, or recycle the oldest active one."""
+        for i, slot in enumerate(self.pool):
+            if not slot['in_use']:
+                return i
+
+        # All slots in use — recycle the one furthest left (oldest)
+        oldest_idx = None
+        oldest_x = float('inf')
+        for i, slot in enumerate(self.pool):
+            if slot['in_use'] and slot['x_pos'] < oldest_x:
+                oldest_x = slot['x_pos']
+                oldest_idx = i
+
+        if oldest_idx is not None:
+            old_seq = self.pool[oldest_idx]['seq_num']
+            if old_seq in self.active:
+                del self.active[old_seq]
+            self.pool[oldest_idx]['in_use'] = False
+            self.pool[oldest_idx]['line'].setVisible(False)
+            self.pool[oldest_idx]['text'].setVisible(False)
+            return oldest_idx
+
+        return 0  # Fallback
 
     def add_marker(self, seq_num, y_offset=0):
-        if seq_num in self.markers: return
+        if seq_num in self.active:
+            return
 
-        # Enforce Cap
-        if len(self.markers) >= self.MAX_MARKERS:
-            # Drop the oldest marker (safe fallback)
-            try:
-                oldest_seq = next(iter(self.markers))
-                self.markers[oldest_seq].destroy()
-                del self.markers[oldest_seq]
-            except StopIteration:
-                pass
+        idx = self._get_free_slot()
+        slot = self.pool[idx]
 
-        try:
-            marker = BreathMarker(self.plot_item, seq_num, y_offset)
-            self.markers[seq_num] = marker
-        except:
-            pass
+        slot['x_pos'] = -0.02
+        slot['in_use'] = True
+        slot['seq_num'] = seq_num
+
+        slot['line'].setPos(slot['x_pos'])
+        slot['line'].setVisible(True)
+
+        slot['text'].setText(f"#{seq_num}")
+        slot['text'].setPos(slot['x_pos'], y_offset)
+        slot['text'].setVisible(True)
+
+        self.active[seq_num] = idx
 
     def move_all(self, step_size):
-        expired_ids = []
-        for seq_num, marker in self.markers.items():
-            new_x = marker.shift(step_size)
-            if new_x < -10.0:
-                expired_ids.append(seq_num)
+        expired = []
+        for seq_num, idx in self.active.items():
+            slot = self.pool[idx]
+            slot['x_pos'] += step_size
+            slot['line'].setPos(slot['x_pos'])
+            slot['text'].setPos(slot['x_pos'], slot['text'].y())
 
-        for seq_num in expired_ids:
-            self.markers[seq_num].destroy()
-            del self.markers[seq_num]
+            if slot['x_pos'] < -10.0:
+                expired.append(seq_num)
+
+        for seq_num in expired:
+            idx = self.active[seq_num]
+            slot = self.pool[idx]
+            # Just hide — never remove, never destroy
+            slot['line'].setVisible(False)
+            slot['text'].setVisible(False)
+            slot['in_use'] = False
+            slot['seq_num'] = None
+            del self.active[seq_num]
 
 
 # -----------------------------------------------------------------------------
@@ -1479,14 +1499,14 @@ class VentilatorApp(QMainWindow):
         self.p_plot = self.plot_widget.addPlot(title="Pressure (cmH2O)")
         self.p_plot.showGrid(x=True, y=True, alpha=0.3)
         self.p_curve = self.p_plot.plot(pen=pg.mkPen('#00ff00', width=2), connect="finite")
-        self.p_markers = BreathMarkerManager(self.p_plot)
+        self.p_markers = BreathMarkerPool(self.p_plot)
 
         self.plot_widget.nextRow()
 
         self.f_plot = self.plot_widget.addPlot(title="Flow (L/min)")
         self.f_plot.showGrid(x=True, y=True, alpha=0.3)
         self.f_curve = self.f_plot.plot(pen=pg.mkPen('#ffff00', width=2), connect="finite")
-        self.f_markers = BreathMarkerManager(self.f_plot)
+        self.f_markers = BreathMarkerPool(self.f_plot)
 
         # Footer
         footer = QFrame()
