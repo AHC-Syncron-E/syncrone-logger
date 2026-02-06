@@ -717,10 +717,54 @@ class SnapshotWorker(QThread):
             f_arr = f_arr[:i]
 
         # 5. Create Signals (p_arr and f_arr are already numpy)
-        p_sig = EdfSignal(p_arr, sampling_frequency=fs, label="Pressure", physical_dimension="cmH2O")
-        f_sig = EdfSignal(f_arr, sampling_frequency=fs, label="Flow", physical_dimension="L/min")
+        p_sig = EdfSignal(p_arr.astype(np.float64), sampling_frequency=fs, label="Pressure", physical_dimension="cmH2O")
+        f_sig = EdfSignal(f_arr.astype(np.float64), sampling_frequency=fs, label="Flow", physical_dimension="L/min")
 
-        # ... (Rest of EDF creation logic remains the same) ...
+        # Build EDF
+        if annotations:
+            edf = Edf(signals=[p_sig, f_sig], annotations=annotations)
+        else:
+            edf = Edf(signals=[p_sig, f_sig])
+
+        # Patient ID Sanitization
+        clean_pid = self.patient_id.strip().replace(" ", "_")
+        if not clean_pid: clean_pid = "X"
+        edf.patient = Patient(name=clean_pid)
+
+        # Date/Time setup
+        start_time_obj = now_dt - timedelta(hours=1)
+        edf.startdate = start_time_obj.date()
+        edf.starttime = start_time_obj.time()
+
+        # File Operations
+        file_ts = now_dt.strftime("%Y%m%d_%H%M%S")
+        filename = f"{clean_pid}_{file_ts}_1H.edf"
+        final_path = self.output_folder / filename
+        temp_path = self.output_folder / f"~temp_{filename}.tmp"
+
+        # Cleanup old files
+        for existing_file in self.output_folder.glob("*.edf"):
+            try:
+                os.remove(existing_file)
+            except OSError:
+                pass
+
+        try:
+            edf.write(str(temp_path))
+            if temp_path.exists():
+                if final_path.exists():
+                    os.remove(final_path)
+                os.rename(temp_path, final_path)
+        except Exception as e:  # <--- Capture the exception 'e'
+            # Log the error so you aren't flying blind if files disappear again
+            try:
+                with open(self.output_folder / "edf_error_log.txt", "a") as f:
+                    f.write(f"[{datetime.now()}] Write Failed: {e}\n")
+            except:
+                pass
+
+            if temp_path.exists():
+                os.remove(temp_path)
 
         # Explicit cleanup
         del p_arr
