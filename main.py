@@ -577,9 +577,7 @@ class SnapshotWorker(QThread):
             conn.close()
             return
 
-        # 2. Pre-allocate Numpy Arrays (ZERO Allocation overhead during loop)
-        # float32 = 4 bytes per sample. 1 hour = 180k samples = ~720KB (Tiny!)
-        # The previous list method used ~12MB + Fragmentation overhead.
+        # 2. Pre-allocate Numpy Arrays
         p_arr = np.zeros(count, dtype=np.float32)
         f_arr = np.zeros(count, dtype=np.float32)
 
@@ -593,7 +591,13 @@ class SnapshotWorker(QThread):
         cursor.execute(query, (cutoff,))
 
         annotations = []
-        last_idx = None
+
+        # --- DURATION CALCULATION STATE VARIABLES ---
+        active_breath_idx = None
+        active_breath_onset = 0.0
+        active_breath_count = 0
+        active_mode_str = "Unknown"
+        # --------------------------------------------
 
         # Use a counter for array indexing
         i = 0
@@ -606,7 +610,7 @@ class SnapshotWorker(QThread):
             for row in batch:
                 if i >= count: break  # Safety break
 
-                # Direct assignment (No object creation overhead for the list)
+                # Direct assignment
                 p_arr[i] = row[0] if row[0] is not None else 0.0
                 f_arr[i] = row[1] if row[1] is not None else 0.0
 
@@ -614,24 +618,56 @@ class SnapshotWorker(QThread):
                 raw_mode = row[2] if row[2] else "Unknown"
                 current_idx = row[3]
 
-                if current_idx is not None and current_idx != last_idx:
-                    onset_sec = i / float(fs)  # Use 'i' instead of len()
+                if current_idx is not None:
+                    # If the breath index has changed, we are transitioning:
+                    # End of OLD breath -> Start of NEW breath
+                    if current_idx != active_breath_idx:
 
-                    if raw_mode.strip() in ["VC A/C", "VC", "VC+ A/C", "VC+"]:
-                        final_mode_str = "VCV"
-                    elif raw_mode.strip() in ["PC A/C", "PC"]:
-                        final_mode_str = "PCV"
+                        # 1. Close out the PREVIOUS breath (if one existed)
+                        if active_breath_idx is not None:
+                            duration_sec = round(active_breath_count / float(fs), 2)
+                            text = f"{active_mode_str}-{active_breath_idx}"
+
+                            # We replace duration=None with the actual calculated seconds
+                            annot = EdfAnnotation(
+                                onset=active_breath_onset,
+                                duration=duration_sec,
+                                text=text
+                            )
+                            annotations.append(annot)
+
+                        # 2. Initialize the NEW breath
+                        active_breath_idx = current_idx
+                        active_breath_onset = i / float(fs)
+                        active_breath_count = 1 # Start counting samples for this new breath
+
+                        # Parse the mode string once at the start of the breath
+                        if raw_mode.strip() in ["VC A/C", "VC", "VC+ A/C", "VC+"]:
+                            active_mode_str = "VCV"
+                        elif raw_mode.strip() in ["PC A/C", "PC"]:
+                            active_mode_str = "PCV"
+                        else:
+                            active_mode_str = "".join(c for c in raw_mode if c.isalnum() or c in " -_.")
+
                     else:
-                        final_mode_str = "".join(c for c in raw_mode if c.isalnum() or c in " -_.")
-
-                    text = f"{final_mode_str}-{current_idx}"
-                    annot = EdfAnnotation(onset=onset_sec, duration=None, text=text)
-                    annotations.append(annot)
-                    last_idx = current_idx
+                        # Same breath index, just increment the sample counter
+                        active_breath_count += 1
 
                 i += 1
 
         conn.close()
+
+        # --- EDGE CASE: Save the very last breath tracked ---
+        if active_breath_idx is not None:
+            duration_sec = round(active_breath_count / float(fs), 2)
+            text = f"{active_mode_str}-{active_breath_idx}"
+            annot = EdfAnnotation(
+                onset=active_breath_onset,
+                duration=duration_sec,
+                text=text
+            )
+            annotations.append(annot)
+        # ----------------------------------------------------
 
         # 4. Truncate if we fetched fewer rows than expected (or remainder)
         remainder = i % fs
@@ -684,8 +720,7 @@ class SnapshotWorker(QThread):
                 if final_path.exists():
                     os.remove(final_path)
                 os.rename(temp_path, final_path)
-        except Exception as e:  # <--- Capture the exception 'e'
-            # Log the error so you aren't flying blind if files disappear again
+        except Exception as e:
             try:
                 with open(self.output_folder / "edf_error_log.txt", "a") as f:
                     f.write(f"[{datetime.now()}] Write Failed: {e}\n")
