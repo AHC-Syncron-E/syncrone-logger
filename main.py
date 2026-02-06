@@ -66,9 +66,9 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QHBoxLayout, QPushButton, QLabel, QFrame, QMessageBox,
                                QLineEdit, QComboBox, QSizePolicy, QDialog, QDialogButtonBox,
                                QGridLayout, QPlainTextEdit, QInputDialog)
-from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer, QEvent
+from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer, QEvent, QRegularExpression
 from PySide6.QtGui import (QFont, QIcon, QColor, QCloseEvent, QPixmap,
-                           QMouseEvent, QTextCursor, QPixmapCache)
+                           QMouseEvent, QTextCursor, QPixmapCache, QRegularExpressionValidator)
 
 # Graphing
 import pyqtgraph as pg
@@ -692,8 +692,10 @@ class SnapshotWorker(QThread):
             edf = Edf(signals=[p_sig, f_sig])
 
         # Patient ID Sanitization
-        clean_pid = self.patient_id.strip().replace(" ", "_")
-        if not clean_pid: clean_pid = "X"
+        clean_pid = "".join(c for c in self.patient_id if c.isalnum() or c in "-_")
+        # Fallback if the ID becomes empty after cleaning
+        if not clean_pid.strip():
+            clean_pid = "Unknown_Patient"
         edf.patient = Patient(name=clean_pid)
 
         # Date/Time setup
@@ -1558,9 +1560,14 @@ class VentilatorApp(QMainWindow):
         lbl_id = QLabel("Patient ID:")
         lbl_id.setStyleSheet("color: #aaa; font-size: 13px; font-weight: bold;")
         self.input_id = QLineEdit()
-        self.input_id.setPlaceholderText("Enter Patient ID to Enable Recording...")
-        self.input_id.setToolTip("Unique identifier for the patient session.")
+        self.input_id.setPlaceholderText("Enter Patient ID (A-Z, 0-9, -, _) to Enable Recording...")
+        self.input_id.setToolTip("Unique identifier. Allowed: Letters, Numbers, Dashes, Underscores.")
         self.input_id.setStyleSheet("padding: 5px; font-size: 14px; color: white; border: 1px solid #555;")
+
+        regex = QRegularExpression("^[a-zA-Z0-9_-]*$")
+        validator = QRegularExpressionValidator(regex, self.input_id)
+        self.input_id.setValidator(validator)
+
         self.input_id.textChanged.connect(self.check_input)
         ig_layout.addWidget(lbl_id)
         ig_layout.addWidget(self.input_id)
