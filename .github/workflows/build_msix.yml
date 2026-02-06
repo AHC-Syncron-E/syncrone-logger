@@ -34,11 +34,11 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install nuitka zstandard
-          pip install pyside6 numpy pyqtgraph pyserial edfio
+          pip install nuitka==2.8.9 zstandard==0.25.0
+          pip install pyside6==6.10.1 numpy==2.4.1 pyqtgraph==0.14.0 pyserial==3.5 edfio==0.4.12
           # We install these so Nuitka can see them if needed, 
           # but we will mostly rely on raw injection for Debug.
-          pip install wandb psutil setuptools importlib_metadata
+          pip install wandb==0.23.1 psutil==7.2.2 setuptools==80.10.2
 
       - name: Set App Version
         run: |
