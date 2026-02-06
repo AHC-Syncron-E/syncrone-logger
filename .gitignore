@@ -1,19 +1,37 @@
-# Build Artifacts
+# Python / Environment
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.env
+venv/
+env/
+
+# Build Artifacts (Nuitka)
+build/
 *.dist/
 *.build/
 *.onefile-build/
 *.exe
-*.zip
-
-# Secrets & Config
-metadata.json  # Prevent accidental secret leaks (we will generate it in CI)
-local_secrets.ps1
-
-# Tools (We will download these in CI)
-ResourceHacker.exe
-ResourceHacker.ini
-SigningTools/
-__pycache__/
-
-# DLLs (Nuitka finds these automatically)
+*.bin
 *.dll
+
+# Distribution
+*.msix
+*.appx
+payload/
+
+# Logs and Reports
+*.log
+*.txt
+!requirements.txt
+!CMakeLists.txt
+coverage_html_report/
+test_results_report.html
+logged_waveforms.txt
+session_data/
+Session_Databases/
+
+# Editor
+.vscode/
+.idea/
