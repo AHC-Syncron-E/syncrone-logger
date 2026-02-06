@@ -1213,8 +1213,6 @@ class VentilatorApp(QMainWindow):
         if self.config_corrupt_msg:
             QTimer.singleShot(500, lambda: QMessageBox.warning(self, "Config Reset", self.config_corrupt_msg))
 
-        # Initialize Telemetry Manager (Starts in dormant state)
-        self.telemetry = TelemetryManager()
 
     def force_maintenance(self):
         # 1. Force Python to reclaim circular references
