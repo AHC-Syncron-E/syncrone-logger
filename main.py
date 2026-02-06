@@ -21,14 +21,6 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from collections import deque
 
-try:
-    import psutil
-    import wandb
-
-    HAS_TELEMETRY_LIBS = True
-except ImportError:
-    HAS_TELEMETRY_LIBS = False
-
 # EDF and Math Libraries
 import numpy as np
 
@@ -60,109 +52,6 @@ import pyqtgraph as pg
 # -----------------------------------------------------------------------------
 APP_VERSION = "1.4.1"  # Bumped version for Auto-Lock
 DEBUG_PIN = "REDACTED_PIN"  # PIN required to access internal debugger
-
-
-class TelemetryManager(QThread):
-    """
-    Monitors system resources and logs them to Weights & Biases.
-    Runs in a separate thread to prevent blocking the UI or Serial comms.
-    """
-
-    def __init__(self, project_name="REDACTED_PROJECT"):
-        super().__init__()
-        self.project_name = project_name
-        self.is_active = False  # Is WandB initialized?
-        self.is_running = False  # Is the thread loop running?
-        self.api_key = None
-
-    def setup(self, api_key):
-        """Authenticates and initializes the WandB run."""
-        if not HAS_TELEMETRY_LIBS:
-            return False
-
-        if self.is_active:
-            return True
-
-        try:
-            # --- FIX: Set Log Directory to Desktop (Safe from AppLocker/MSIX) ---
-            safe_dir = Path.home() / "Desktop" / "Syncron-E Data" / "telemetry_logs"
-            safe_dir.mkdir(parents=True, exist_ok=True)
-
-            # Set ENV vars before login/init
-            os.environ['WANDB_DIR'] = str(safe_dir)
-            os.environ['WANDB_CONFIG_DIR'] = str(safe_dir)
-            os.environ['WANDB_CACHE_DIR'] = str(safe_dir)
-            os.environ['WANDB_DATA_DIR'] = str(safe_dir)
-
-            self.api_key = api_key
-
-            # Pass dir explicitly to login/init to be safe
-            wandb.login(key=self.api_key)
-
-            run_name = f"sess_{datetime.now().strftime('%m%d_%H%M')}_{os.getlogin()}"
-
-            wandb.init(
-                project=self.project_name,
-                name=run_name,
-                dir=str(safe_dir),  # <--- CRITICAL: Force write to safe dir
-                config={
-                    "version": APP_VERSION,
-                    "platform": sys.platform
-                },
-                settings=wandb.Settings(start_method="thread")
-            )
-            self.is_active = True
-            return True
-        except Exception as e:
-            print(f"WandB Init Error: {e}")
-            return False
-
-    def run(self):
-        """The main monitoring loop."""
-        if not HAS_TELEMETRY_LIBS or not self.is_active: return
-
-        process = psutil.Process(os.getpid())
-
-        while self.is_running:
-            try:
-                # 1. Collect Metrics
-                mem = process.memory_info()
-                metrics = {
-                    "app_rss_mb": mem.rss / (1024 * 1024),  # Resident Set Size (Physical RAM)
-                    "app_vms_mb": mem.vms / (1024 * 1024),  # Virtual Memory Size
-                    "app_cpu_percent": process.cpu_percent(interval=None),
-                    "app_threads": process.num_threads(),
-                    "system_cpu_percent": psutil.cpu_percent(),
-                    "system_ram_percent": psutil.virtual_memory().percent
-                }
-
-                # 2. Push to WandB
-                wandb.log(metrics)
-
-                # 3. Sleep (Sample every 10 seconds)
-                for _ in range(10):
-                    if not self.is_running: break
-                    time.sleep(1)
-
-            except Exception as e:
-                # If network fails, just wait and retry. Don't crash.
-                time.sleep(5)
-
-    def start_logging(self):
-        if self.is_active:
-            self.is_running = True
-            self.start()
-
-    def stop_logging(self):
-        self.is_running = False
-        self.wait()
-        if self.is_active:
-            try:
-                wandb.finish()
-            except:
-                pass
-            self.is_active = False
-
 
 # -----------------------------------------------------------------------------
 # 0. HELPER UI CLASSES
@@ -320,24 +209,6 @@ class AboutDialog(QDialog):
         lbl_info = QLabel("Autonomous Healthcare, Inc.\nsupport@autonomoushealthcare.com")
         lbl_info.setAlignment(Qt.AlignCenter)
         lbl_info.setStyleSheet("color: #ddd;")
-
-        self.btn_telemetry = QPushButton("Enable WandB Telemetry")
-        self.btn_telemetry.setFixedHeight(40)
-        self.btn_telemetry.setStyleSheet(
-            "background-color: #333; color: #aaa; border: 1px solid #555; border-radius: 4px;")
-
-        # Check state to update button appearance
-        if not HAS_TELEMETRY_LIBS:
-            self.btn_telemetry.setText("Telemetry Unavailable (Missing Libs)")
-            self.btn_telemetry.setEnabled(False)
-        elif self.parent_window.telemetry.is_active:
-            self.btn_telemetry.setText("Telemetry ACTIVE ✓")
-            self.btn_telemetry.setStyleSheet("background-color: #004400; color: #00ff00; border: 1px solid #00ff00;")
-            self.btn_telemetry.setEnabled(False)
-        else:
-            self.btn_telemetry.clicked.connect(self.activate_telemetry)
-
-        layout.addWidget(self.btn_telemetry)  # Add above Debugger button
 
         # Button
         self.btn_debug = QPushButton("Launch Internal Debugger")
@@ -571,8 +442,19 @@ class BreathMarker:
 
     def destroy(self):
         try:
-            self.plot_item.removeItem(self.line)
-            self.plot_item.removeItem(self.text)
+            # 1. Remove from scene (Visual removal)
+            if self.line.scene():
+                self.plot_item.removeItem(self.line)
+            if self.text.scene():
+                self.plot_item.removeItem(self.text)
+
+            # 2. CRITICAL FIX: Delete the C++ object immediately
+            self.line.deleteLater()
+            self.text.deleteLater()
+
+            # 3. Clear Python references
+            self.line = None
+            self.text = None
         except:
             pass
 
@@ -1312,6 +1194,13 @@ class VentilatorApp(QMainWindow):
         self.prevent_sleep()
         self.init_ui()
 
+        # NEW: Force Garbage Collection every 5 minutes to combat heap fragmentation
+        # from the continuous creation/deletion of graphics items and snapshot tuples.
+        self.gc_timer = QTimer(self)
+        self.gc_timer.setInterval(5 * 60 * 1000)  # 5 Minutes
+        self.gc_timer.timeout.connect(self.force_maintenance)
+        self.gc_timer.start()
+
         # AUTO-LOCK LOGIC (NEW)
         self.inactivity_timer = QTimer(self)
         self.inactivity_timer.setInterval(5 * 60 * 1000)  # 5 Minutes
@@ -1326,6 +1215,14 @@ class VentilatorApp(QMainWindow):
 
         # Initialize Telemetry Manager (Starts in dormant state)
         self.telemetry = TelemetryManager()
+
+    def force_maintenance(self):
+        # 1. Force Python to reclaim circular references
+        gc.collect()
+
+        # 2. Optional: Empty Qt's internal memory caches
+        # (Only if you really need to squeeze bytes, usually gc.collect is enough)
+        QPixmap.cache().clear()
 
     def prevent_sleep(self):
         try:
