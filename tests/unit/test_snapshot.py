@@ -2,7 +2,7 @@ import pytest
 import sqlite3
 import os
 from pathlib import Path
-from main import SnapshotWorker
+from syncrone.main import SnapshotWorker
 
 
 class TestSnapshotWorker:

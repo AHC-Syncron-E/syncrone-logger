@@ -3,8 +3,8 @@ import time
 import sys
 from unittest.mock import MagicMock
 # Import main so we can patch its specific references
-import main
-from main import VentilatorWorker
+from syncrone import main
+from syncrone.main import VentilatorWorker
 
 # -------------------------------------------------------------------------
 # REAL DATA PAYLOAD

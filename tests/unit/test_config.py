@@ -2,8 +2,8 @@ import pytest
 import json
 from unittest.mock import MagicMock, mock_open
 # We import main to make sure it's loaded, but we patch components on it
-import main
-from main import VentilatorApp
+from syncrone import main
+from syncrone.main import VentilatorApp
 
 
 class TestConfigSystem:

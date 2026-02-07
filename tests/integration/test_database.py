@@ -3,7 +3,7 @@ import sqlite3
 import os
 import time
 from pathlib import Path
-from main import DatabaseManager
+from syncrone.main import DatabaseManager
 
 
 class TestDatabaseIntegration:

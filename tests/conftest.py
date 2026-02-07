@@ -8,7 +8,7 @@ import pytest
 # 1. FIX IMPORT PATH
 # -------------------------------------------------------------------------
 root_dir = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(root_dir))
+sys.path.insert(0, str(root_dir / "src"))
 
 # -------------------------------------------------------------------------
 # 2. PRE-MOCK DEPENDENCIES
@@ -29,7 +29,7 @@ mock_pg = MagicMock()
 sys.modules['pyqtgraph'] = mock_pg
 
 # NOW it is safe to import main
-import main
+from syncrone import main
 
 
 # -------------------------------------------------------------------------

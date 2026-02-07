@@ -69,7 +69,7 @@ jobs:
             src/syncrone/simulator.py
 
           # Rename the dist folder to something clean for packaging
-          Move-Item -Path "build\pb980_simulator_gui.dist" -Destination "payload"
+          Move-Item -Path "build\simulator.dist" -Destination "payload"
 
       # --- 4. Sign the Inner Executables (EXE/DLL) ---
       - name: Sign Binaries (EXE, DLL, PYD)
@@ -142,7 +142,7 @@ jobs:
               <rescap:Capability Name="runFullTrust" />
             </Capabilities>
             <Applications>
-              <Application Id="SyncronESimulatorApp" Executable="pb980_simulator_gui.exe" EntryPoint="Windows.FullTrustApplication">
+              <Application Id="SyncronESimulatorApp" Executable="simulator.exe" EntryPoint="Windows.FullTrustApplication">
                 <uap:VisualElements 
                   DisplayName="PB980 Simulator" 
                   Description="Hardware Simulator for PB980 Ventilator" 

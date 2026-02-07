@@ -4,7 +4,7 @@ from PySide6.QtCore import Qt
 from unittest.mock import MagicMock
 
 # Import the application
-import main
+from syncrone import main
 
 
 class TestUserInterface:

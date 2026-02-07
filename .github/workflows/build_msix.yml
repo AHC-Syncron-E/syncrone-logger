@@ -44,7 +44,7 @@ jobs:
       - name: Inject Version into Code
         run: |
           $ver = "${{ env.APP_VERSION }}"
-          (Get-Content main.py) -replace 'APP_VERSION = ".*?"', "APP_VERSION = `"$ver`"" | Set-Content main.py
+          (Get-Content src/syncrone/main.py) -replace 'APP_VERSION = ".*?"', "APP_VERSION = `"$ver`"" | Set-Content src/syncrone/main.py
 
       # --- 1. COMPILE (Fast Mode) ---
       - name: Compile Standalone

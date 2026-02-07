@@ -44,7 +44,7 @@ The application is deployed as a **Signed MSIX Package**, ensuring clean install
 
 3. Run the Recorder (Main App):
    ```bash
-   python main.py
+   python src/syncrone/main.py
    
    ```
 
@@ -53,7 +53,7 @@ The application is deployed as a **Signed MSIX Package**, ensuring clean install
 *Requires 1Password CLI configured for the `REDACTED_PROJECT` project.*
    ```powershell
    # Injects WANDB_API_KEY environment variable at runtime
-   op run --env-file .env -- python watchdog.py
+   op run --env-file .env -- python src/syncrone/watchdog.py
    
    ```
 
@@ -83,6 +83,21 @@ Wraps the compiled binaries into a Windows Container.
 
 All binaries (`.exe`, `.dll`, `.pyd`) and the final `.msix` are recursively signed via Azure Trusted Signing in the CI/CD pipeline.
 
+### 4. `watchdog.py` Process Detection
+
+The watchdog looks for processes by name/command line.
+* **Old:** It looked for `python main.py` or `main.exe`.
+* **New:** In dev, it will see `python src/syncrone/main.py`.
+
+In `src/syncrone/watchdog.py`, update the auto-select filter logic:
+```python
+    def populate_processes(self):
+        # ...
+                # Track auto-select candidates
+                # FIX: Check for the new script path or package execution
+                if "syncrone/main.py" in cmd_str or "SyncronE" in name: 
+                    candidates.append(display_text)
+```
 ---
 
 ## ✨ Features & Status

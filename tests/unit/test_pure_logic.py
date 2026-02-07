@@ -1,5 +1,5 @@
 import pytest
-from main import VentilatorWorker
+from syncrone.main import VentilatorWorker
 
 
 class TestWaveformLogic:
