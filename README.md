@@ -53,7 +53,7 @@ The application is deployed as a **Signed MSIX Package**, ensuring clean install
 *Requires 1Password CLI configured for the `REDACTED_PROJECT` project.*
    ```powershell
    # Injects WANDB_API_KEY environment variable at runtime
-   op run -- python watchdog.py
+   op run --env-file .env -- python watchdog.py
    
    ```
 

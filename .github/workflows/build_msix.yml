@@ -2,7 +2,7 @@ name: Build MSIX Installer
 
 on:
   push:
-    branches: [ "main" ]
+    branches: [ "main", "refactor/src-layout" ]
   workflow_dispatch:
 
 permissions:
@@ -59,17 +59,17 @@ jobs:
             "--noinclude-unittest-mode=nofollow",
             "--noinclude-setuptools-mode=nofollow",
             "--noinclude-IPython-mode=nofollow",
-            "--windows-icon-from-ico=icon.ico",
+            "--windows-icon-from-ico=assets/icon.ico",
             "--windows-console-mode=disable",
             "--output-dir=build",
             "--company-name=Autonomous Healthcare Inc.",
             "--product-name=Syncron-E Waveform Recorder",
             "--file-version=${{ env.APP_VERSION }}",
             "--product-version=${{ env.APP_VERSION }}",
-            "--include-data-file=ahc_logo.svg=ahc_logo.svg"
+            "--include-data-file=assets/ahc_logo.svg=assets/ahc_logo.svg"
           )
 
-          python -m nuitka $nuitka_args main.py
+          python -m nuitka $nuitka_args src/syncrone/main.py
 
           # Prepare payload folder
           if (Test-Path "payload") { Remove-Item "payload" -Recurse -Force }
@@ -98,15 +98,15 @@ jobs:
           $assetsDir = "$payloadDir\Assets"
           New-Item -ItemType Directory -Force -Path $assetsDir
 
-          magick "ahclogo_transp_notxt_square.png" -resize 44x44   "$assetsDir\Square44x44Logo.png"
-          magick "ahclogo_transp_notxt_square.png" -resize 150x150 "$assetsDir\Square150x150Logo.png"
-          magick "ahclogo_transp_notxt_square.png" -resize 50x50   "$assetsDir\StoreLogo.png"
-          magick "ahclogo_transp_notxt_square.png" -resize 150x150 "$assetsDir\SplashScreen.png"
+          magick "assets/ahclogo_transp_notxt_square.png" -resize 44x44   "$assetsDir\Square44x44Logo.png"
+          magick "assets/ahclogo_transp_notxt_square.png" -resize 150x150 "$assetsDir\Square150x150Logo.png"
+          magick "assets/ahclogo_transp_notxt_square.png" -resize 50x50   "$assetsDir\StoreLogo.png"
+          magick "assets/ahclogo_transp_notxt_square.png" -resize 150x150 "$assetsDir\SplashScreen.png"
 
           $sizes = 16, 24, 32, 48, 256
           foreach ($size in $sizes) {
-              magick "ahclogo_transp_notxt_square.png" -resize "${size}x${size}" "$assetsDir\Square44x44Logo.targetsize-${size}.png"
-              magick "ahclogo_transp_notxt_square.png" -resize "${size}x${size}" "$assetsDir\Square44x44Logo.targetsize-${size}_altform-unplated.png"
+              magick "assets/ahclogo_transp_notxt_square.png" -resize "${size}x${size}" "$assetsDir\Square44x44Logo.targetsize-${size}.png"
+              magick "assets/ahclogo_transp_notxt_square.png" -resize "${size}x${size}" "$assetsDir\Square44x44Logo.targetsize-${size}_altform-unplated.png"
           }
 
           $identityName = "${{ env.APP_NAME }}"
