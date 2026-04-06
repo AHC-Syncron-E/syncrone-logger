@@ -62,7 +62,7 @@ The CSV format specification for Syncron-E input files is documented in the Sync
 
 ## PB840/PB980 Compatibility
 
-Waveform fidelity validation was performed on the **PB980** ventilator. The PB840 uses a similar serial communication protocol with the same BS/BE breath-delimited ASCII waveform payload format at 50 Hz. PB840 compatibility is expected based on the shared serial protocol, and is supported by the successful use of PB840 serial port waveform data in published research (Adams et al., Scientific Reports, 2017;7:14980) .
+Waveform fidelity validation was performed on the **PB980** ventilator. The PB840 uses a similar serial communication protocol with the same BS/BE breath-delimited ASCII waveform payload format at 50 Hz. PB840 compatibility is expected based on the shared serial protocol, and is supported by the successful use of PB840 serial port waveform data in published research (Adams et al., Scientific Reports, 2017;7:14980).
 
 ---
 
