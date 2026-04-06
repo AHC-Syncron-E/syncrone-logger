@@ -532,7 +532,7 @@ class SnapshotWorker(QThread):
             edf = Edf(signals=[p_sig, f_sig])
 
         # Patient ID Sanitization
-        clean_pid = "".join(c for c in self.patient_id if c.isalnum() or c in "-_")
+        clean_pid = "".join(c if (c.isalnum() or c in "-_") else "_" for c in self.patient_id)
         # Fallback if the ID becomes empty after cleaning
         if not clean_pid.strip():
             clean_pid = "Unknown_Patient"
