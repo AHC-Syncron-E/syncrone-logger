@@ -8,6 +8,7 @@ Used by ``analyze_run{1..5}.py`` marimo notebooks.
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,9 +24,13 @@ from scipy.stats import pearsonr
 # Constants
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# Base directory for validation analysis data files.
+# Set SYNCRONE_VALIDATION_DATA environment variable to override.
 BASE_DIR = Path(
-    "REDACTED_PATH"
-    "/SYNC-VP-WFR-001"
+    os.environ.get(
+        "SYNCRONE_VALIDATION_DATA",
+        str(Path(__file__).resolve().parent.parent / "validation_data"),
+    )
 )
 
 _HEADER_SIZE = 500

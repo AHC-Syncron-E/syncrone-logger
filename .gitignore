@@ -35,3 +35,8 @@ Session_Databases/
 # Editor
 .vscode/
 .idea/
+# Internal development files
+GEMINI.md
+watchdog.py
+metadata.json
+logged_waveforms.txt

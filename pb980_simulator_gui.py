@@ -22,8 +22,10 @@ SAMPLE_RATE_MS = 0.02
 SUPPORTED_VIDS = [0x067B, 0x0403]  # Prolific, FTDI
 
 # --- PAYLOAD DATA ---
-REAL_PB980_PAYLOAD = (
-    b'MISCF,1225,169 ,\x0213:11 ,980 SIM000000001    ,JAN 27 2026 ,INVASIVE ,A/C   ,VC    ,'
+# Synthetic PB980 MISCF payload for simulator testing.
+# Format matches PB980 serial protocol (see PB980 Owner's Manual).
+SIMULATED_PB980_PAYLOAD = (
+    b'MISCF,1225,169 ,\x0212:00 ,980 SIM000000001  ,JAN 01 2026 ,INVASIVE ,A/C   ,VC    ,'
     b'      ,V-Trig,10.0  ,0.400 ,44.0  ,21    ,      ,0.0   ,0.0   ,60    ,      ,10.0  ,'
     b'      ,100   ,15    ,0.74  ,      ,PC    ,1.00  ,7.11  ,      ,RAMP  ,OFF   ,100   ,'
     b'      ,48.500,0.100 ,1370  ,210   ,1370  ,210   ,OFF   ,      ,3.5   ,2.0   ,      ,'
@@ -203,7 +205,7 @@ class SettingsWorker(QThread):
                             if decoded == "SNDF":
                                 now = time.monotonic()
                                 if (now - last_response_time) > MIN_RESPONSE_INTERVAL:
-                                    self.ser.write(REAL_PB980_PAYLOAD)
+                                    self.ser.write(SIMULATED_PB980_PAYLOAD)
                                     self.ser.flush()
                                     self.sig_log.emit("Received SNDF -> Sent Settings Payload", "#00ff00")
                                     last_response_time = now

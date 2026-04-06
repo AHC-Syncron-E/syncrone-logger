@@ -38,9 +38,10 @@ class TestSettingsLogic:
     """
     Tests the logic for parsing PB980 settings CSV strings.
     """
-    # This is the exact payload you verified with pyserial
-    REAL_PB980_PAYLOAD = (
-        b'MISCF,1225,169 ,\x0213:11 ,980 SIM000000001    ,JAN 27 2026 ,INVASIVE ,A/C   ,VC    ,'
+    # Synthetic PB980 MISCF payload for unit testing.
+    # Format matches PB980 serial protocol (see PB980 Owner's Manual).
+    SIMULATED_PB980_PAYLOAD = (
+        b'MISCF,1225,169 ,\x0212:00 ,980 SIM000000001  ,JAN 01 2026 ,INVASIVE ,A/C   ,VC    ,'
         b'      ,V-Trig,10.0  ,0.400 ,44.0  ,21    ,      ,0.0   ,0.0   ,60    ,      ,10.0  ,'
         b'      ,100   ,15    ,0.74  ,      ,PC    ,1.00  ,7.11  ,      ,RAMP  ,OFF   ,100   ,'
         b'      ,48.500,0.100 ,1370  ,210   ,1370  ,210   ,OFF   ,      ,3.5   ,2.0   ,      ,'
@@ -61,7 +62,7 @@ class TestSettingsLogic:
         """
         Verify that the specific binary payload from the PB980 parses correctly.
         """
-        buffer, results = VentilatorWorker.parse_settings_chunk("", self.REAL_PB980_PAYLOAD)
+        buffer, results = VentilatorWorker.parse_settings_chunk("", self.SIMULATED_PB980_PAYLOAD)
 
         # Buffer should be clear (because payload ends in \r)
         assert buffer == ""
@@ -80,9 +81,9 @@ class TestSettingsLogic:
         Ensure large CSV lines can arrive in chunks.
         """
         # Split the real payload in half
-        mid_point = len(self.REAL_PB980_PAYLOAD) // 2
-        chunk1 = self.REAL_PB980_PAYLOAD[:mid_point]
-        chunk2 = self.REAL_PB980_PAYLOAD[mid_point:]
+        mid_point = len(self.SIMULATED_PB980_PAYLOAD) // 2
+        chunk1 = self.SIMULATED_PB980_PAYLOAD[:mid_point]
+        chunk2 = self.SIMULATED_PB980_PAYLOAD[mid_point:]
 
         # Feed chunk 1
         buffer, results = VentilatorWorker.parse_settings_chunk("", chunk1)

@@ -2,7 +2,7 @@
 
 **Syncron-E Waveform Recorder** is a high-fidelity medical ventilator waveform recorder designed for long-duration (7+ days) clinical studies. It captures serial data from Puritan Bennett 980 ventilators, visualizes it in real-time, and generates 1-hour EDF snapshots.
 
-![License](https://img.shields.io/badge/license-Proprietary-red)
+![License](https://img.shields.io/badge/license-MIT-green)
 ![Platform](https://img.shields.io/badge/platform-Windows_11_(MSIX)-blue)
 ![Python](https://img.shields.io/badge/python-3.13-yellow)
 
@@ -82,7 +82,6 @@ The application is deployed as a **Signed MSIX Package**, ensuring clean install
 ### Prerequisites
 * **Windows 11** (Recommended for Nuitka/MSIX compatibility)
 * **Python 3.13**
-* **1Password CLI (`op`)** (Required for Telemetry/Watchdog)
 
 ### Local Environment
 1. Clone the repository:
@@ -101,13 +100,6 @@ The application is deployed as a **Signed MSIX Package**, ensuring clean install
 3. Run the Recorder (Main App):
    ```bash
    python main.py
-   ```
-
-4. Run the Watchdog (Telemetry):
-*Requires 1Password CLI configured for the `REDACTED_PROJECT` project.*
-   ```powershell
-   # Injects WANDB_API_KEY environment variable at runtime
-   op run -- python watchdog.py
    ```
 
 ---
@@ -145,7 +137,6 @@ All binaries (`.exe`, `.dll`, `.pyd`) and the final `.msix` are recursively sign
 | **Storage (Raw)** | Done | SQLite Batch Insert (One row per sample) |
 | **Storage (Export)** | Done | Rolling 1-Hour EDF Files (edfio) |
 | **Breath Detection** | Done | Automatic sequence tracking & duration calc |
-| **Telemetry** | Done | Out-of-process Sidecar (`watchdog.py`) |
 | **Crash Safety** | Done | Auto-restart & SQLite WAL journal persistence |
 
 ## Data Output Convention

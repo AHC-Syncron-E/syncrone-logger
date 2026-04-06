@@ -40,8 +40,6 @@ import sqlite3
 import traceback
 import json
 import gc  # Required for explicit memory management in long-running threads
-import code  # Required for the embedded console
-from io import StringIO  # Required to capture print() output
 from pathlib import Path
 from datetime import datetime, timedelta
 from collections import deque
@@ -65,7 +63,7 @@ import serial.tools.list_ports
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                                QHBoxLayout, QPushButton, QLabel, QFrame, QMessageBox,
                                QLineEdit, QComboBox, QSizePolicy, QDialog, QDialogButtonBox,
-                               QGridLayout, QPlainTextEdit, QInputDialog)
+                               QGridLayout, QPlainTextEdit)
 from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer, QEvent, QRegularExpression
 from PySide6.QtGui import (QFont, QIcon, QColor, QCloseEvent, QPixmap,
                            QMouseEvent, QTextCursor, QPixmapCache, QRegularExpressionValidator)
@@ -81,7 +79,6 @@ pg.setConfigOption('enableExperimental', False)
 # GLOBAL CONSTANTS
 # -----------------------------------------------------------------------------
 APP_VERSION = "1.4.2"  # Bumped for Memory Fixes
-DEBUG_PIN = "REDACTED_PIN"  # PIN required to access internal debugger
 
 # -----------------------------------------------------------------------------
 # 0. HELPER UI CLASSES
@@ -93,124 +90,6 @@ class ClickableLabel(QLabel):
         if event.button() == Qt.LeftButton:
             self.clicked.emit()
         super().mousePressEvent(event)
-
-
-class EmbeddedTerminal(QDialog):
-    """
-    An in-process Python shell.
-    Allows executing commands within the running application's context.
-    Safe for AppLocker environments as it spawns no new processes.
-    """
-
-    def __init__(self, context_vars, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Syncron-E Internal Debugger")
-        self.resize(800, 600)
-        self.setStyleSheet("""
-            QDialog { background-color: #1e1e1e; }
-            QPlainTextEdit { 
-                background-color: #1e1e1e; 
-                color: #00ff00; 
-                font-family: Consolas, 'Courier New', monospace;
-                font-size: 11pt;
-                border: none;
-            }
-            QLineEdit {
-                background-color: #2b2b2b;
-                color: #ffffff;
-                font-family: Consolas, 'Courier New', monospace;
-                font-size: 11pt;
-                border-top: 1px solid #555;
-                padding: 5px;
-            }
-        """)
-
-        # Layout
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
-
-        # Output Display (Read-Only)
-        self.display = QPlainTextEdit()
-        self.display.setReadOnly(True)
-        layout.addWidget(self.display)
-
-        # Input Line
-        self.input_line = QLineEdit()
-        self.input_line.setPlaceholderText(">>> Type Python commands here...")
-        self.input_line.returnPressed.connect(self.execute_command)
-        layout.addWidget(self.input_line)
-
-        # Python Console Logic
-        self.console = code.InteractiveConsole(locals=context_vars)
-
-        # Command History
-        self.history = []
-        self.history_idx = 0
-
-        # Welcome Message
-        self.write_output(f"--- SYNCRONE INTERNAL SHELL ---\nPython {sys.version}\n")
-        self.write_output("Locals available: 'window', 'worker', 'serial', 'os', 'sys'\n")
-        self.write_output("WARNING: This shell interacts directly with the live application.\n")
-        self.write_output("-" * 40 + "\n")
-        self.input_line.setFocus()
-
-    def write_output(self, text):
-        self.display.moveCursor(QTextCursor.End)
-        self.display.insertPlainText(text)
-        self.display.moveCursor(QTextCursor.End)
-
-    def execute_command(self):
-        cmd = self.input_line.text()
-        self.write_output(f">>> {cmd}\n")
-        self.history.append(cmd)
-        self.history_idx = len(self.history)
-        self.input_line.clear()
-
-        if cmd.strip() == "clear":
-            self.display.clear()
-            return
-
-        if cmd.strip() == "exit":
-            self.accept()
-            return
-
-        # Redirect stdout/stderr to capture output
-        old_stdout = sys.stdout
-        old_stderr = sys.stderr
-        captured_output = StringIO()
-
-        try:
-            sys.stdout = captured_output
-            sys.stderr = captured_output
-            more = self.console.push(cmd)
-
-            if more:
-                self.write_output("... (multiline input not fully supported in this simple shell)\n")
-
-        except Exception as e:
-            captured_output.write(f"{e}\n")
-        finally:
-            sys.stdout = old_stdout
-            sys.stderr = old_stderr
-            output = captured_output.getvalue()
-            if output:
-                self.write_output(output)
-
-    def keyPressEvent(self, event):
-        if event.key() == Qt.Key_Up:
-            if self.history and self.history_idx > 0:
-                self.history_idx -= 1
-                self.input_line.setText(self.history[self.history_idx])
-        elif event.key() == Qt.Key_Down:
-            if self.history and self.history_idx < len(self.history) - 1:
-                self.history_idx += 1
-                self.input_line.setText(self.history[self.history_idx])
-            else:
-                self.history_idx = len(self.history)
-                self.input_line.clear()
-
-        super().keyPressEvent(event)
 
 
 class AboutDialog(QDialog):
@@ -240,50 +119,11 @@ class AboutDialog(QDialog):
         lbl_info.setAlignment(Qt.AlignCenter)
         lbl_info.setStyleSheet("color: #ddd;")
 
-        # Button
-        self.btn_debug = QPushButton("Launch Internal Debugger")
-        self.btn_debug.setFixedHeight(40)
-        self.btn_debug.setStyleSheet("background-color: #444; color: #ccc; border: 1px solid #666; border-radius: 4px;")
-        self.btn_debug.clicked.connect(self.launch_shell)
-
-        # Adjust button style if recording to warn user
-        if self.parent_window.is_logging:
-            self.btn_debug.setText("Debugger (CAUTION: Recording Active)")
-            self.btn_debug.setStyleSheet(
-                "background-color: #552200; color: #ffa500; border: 1px solid #ffaa00; border-radius: 4px;")
-
         layout.addWidget(lbl_title)
         layout.addWidget(lbl_ver)
         layout.addWidget(lbl_info)
         layout.addStretch()
-        layout.addWidget(self.btn_debug)
         layout.addWidget(QDialogButtonBox(QDialogButtonBox.Ok, accepted=self.accept))
-
-    def launch_shell(self):
-        text, ok = QInputDialog.getText(self, "Restricted Access",
-                                        "Enter Debug PIN:",
-                                        QLineEdit.Password)
-
-        if not ok:
-            return  # User cancelled
-
-        if text != DEBUG_PIN:
-            QMessageBox.warning(self, "Access Denied", "Incorrect PIN.")
-            return
-
-        context = {
-            'window': self.parent_window,
-            'worker': self.parent_window.worker,
-            'serial': serial,
-            'sys': sys,
-            'os': os,
-            'sqlite3': sqlite3,
-            'db_manager': self.parent_window.worker.db_manager if self.parent_window.worker else None
-        }
-
-        self.accept()
-        console = EmbeddedTerminal(context, self.parent_window)
-        console.exec()
 
 
 # -----------------------------------------------------------------------------
