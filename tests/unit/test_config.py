@@ -26,11 +26,7 @@ class TestConfigSystem:
         mocker.patch('main.VentilatorWorker')
         mocker.patch('main.SnapshotWorker')
 
-        # 3. Mock Telemetry (The likely cause of the crash)
-        # This replaces the class in main.py, so self.telemetry becomes a MagicMock
-        mocker.patch('main.TelemetryManager')
-
-        # 4. Mock QTimer (The user-identified suspect)
+        # 3. Mock QTimer (The user-identified suspect)
         # This prevents the render timer from ever connecting to the C++ event loop
         mocker.patch('main.QTimer')
 

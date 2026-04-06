@@ -5,6 +5,7 @@ pyserial>=3.5
 pyqtgraph>=0.13.3
 psutil>=5.9.0
 wandb>=0.16.0
+edfio>=0.4.12
 
 # Testing Dependencies
 pytest>=8.0.0
