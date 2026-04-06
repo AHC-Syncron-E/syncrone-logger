@@ -12,7 +12,11 @@ https://github.com/user-attachments/assets/35190ce7-5202-4cdf-be44-c5994cd247a7
 
 ## Waveform Fidelity Validation
 
-The Syncron-E Waveform Recorder has been validated for waveform fidelity under formal protocol **SYNC-VP-WFR-001** using a PB980 ventilator (S/N 35B1801059) connected to an Ingmar Medical ASL5000 Breathing Simulator (S/N 3102, calibration date: 2024-06-06) as the independent reference standard. The ASL5000 provides airway-proximal pressure and flow measurements at 512 Hz through internal sensors independent of the PB980's measurement system.
+The Syncron-E Waveform Recorder has been validated for waveform fidelity 
+under formal protocol **SYNC-VP-WFR-001** using a PB980 ventilator (S/N 
+35B1801059) connected to an Ingmar Medical ASL5000 Breathing Simulator (S/N 
+3102, calibration date: 2025-11-03) as the independent reference standard. 
+The ASL5000 provides airway-proximal pressure and flow measurements at 512 Hz through internal sensors independent of the PB980's measurement system.
 
 **Waveform Recorder version tested:** v1.0.0.61
 
