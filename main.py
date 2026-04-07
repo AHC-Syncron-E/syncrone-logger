@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import sys
 import os
 
@@ -84,16 +86,19 @@ APP_VERSION = "1.4.2"  # Bumped for Memory Fixes
 # 0. HELPER UI CLASSES
 # -----------------------------------------------------------------------------
 class ClickableLabel(QLabel):
+    """QLabel subclass that emits a ``clicked`` signal on left-click."""
     clicked = Signal()
 
-    def mousePressEvent(self, event: QMouseEvent):
+    def mousePressEvent(self, event: QMouseEvent) -> None:
         if event.button() == Qt.LeftButton:
             self.clicked.emit()
         super().mousePressEvent(event)
 
 
 class AboutDialog(QDialog):
-    def __init__(self, parent_window):
+    """Modal dialog displaying application version and contact information."""
+
+    def __init__(self, parent_window: QMainWindow) -> None:
         super().__init__(parent_window)
         self.parent_window = parent_window
         self.setWindowTitle("About Syncron-E")
@@ -130,12 +135,25 @@ class AboutDialog(QDialog):
 # 1. DATABASE MANAGER
 # -----------------------------------------------------------------------------
 class DatabaseManager:
-    def __init__(self, db_path):
+    """SQLite persistence layer for ventilator waveform and settings data.
+
+    Uses WAL journal mode for concurrent read/write access during
+    long-duration recording sessions. Schema includes indexed waveform
+    and settings tables with automatic migration from older versions.
+
+    Parameters
+    ----------
+    db_path : str | Path
+        Filesystem path for the SQLite database file.
+    """
+
+    def __init__(self, db_path: str | Path) -> None:
         self.db_path = Path(db_path)
         self.conn = None
         self.cursor = None
 
-    def connect(self):
+    def connect(self) -> None:
+        """Establish connection to the SQLite database and initialize schema."""
         if not self.db_path.parent.exists():
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -149,7 +167,7 @@ class DatabaseManager:
         self.conn.execute("PRAGMA synchronous=NORMAL;")
         self._create_tables()
 
-    def _needs_migration(self):
+    def _needs_migration(self) -> bool:
         try:
             temp_conn = sqlite3.connect(str(self.db_path))
             cursor = temp_conn.cursor()
@@ -165,7 +183,7 @@ class DatabaseManager:
         except:
             return False
 
-    def _get_tables(self, path):
+    def _get_tables(self, path: str | Path) -> list[str]:
         try:
             temp_conn = sqlite3.connect(str(path))
             cursor = temp_conn.cursor()
@@ -176,7 +194,7 @@ class DatabaseManager:
         except:
             return []
 
-    def _backup_and_reset(self):
+    def _backup_and_reset(self) -> None:
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_name = self.db_path.parent / f"syncrone_backup_SCHEMA_{timestamp}.db"
         try:
@@ -184,7 +202,7 @@ class DatabaseManager:
         except:
             pass
 
-    def _create_tables(self):
+    def _create_tables(self) -> None:
         # SCHEMA: one row per sample
         self.conn.execute("""
                           CREATE TABLE IF NOT EXISTS waveforms
@@ -234,10 +252,13 @@ class DatabaseManager:
         self.conn.commit()
 
     # --- BATCH INSERT (NEW FIX) ---
-    def insert_batch_waveforms(self, rows):
-        """
-        Inserts multiple waveform samples at once for high fidelity.
-        rows: List of tuples (session_id, timestamp, raw_data, pressure, flow, mode, breath_idx)
+    def insert_batch_waveforms(self, rows: list[tuple]) -> None:
+        """Insert multiple waveform samples at once for high fidelity.
+
+        Parameters
+        ----------
+        rows : list[tuple]
+            List of tuples (session_id, timestamp, raw_data, pressure, flow, mode, breath_idx).
         """
         self.conn.executemany(
             "INSERT INTO waveforms (session_id, timestamp, raw_data, parsed_pressure, parsed_flow, vent_mode, breath_index) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -245,23 +266,51 @@ class DatabaseManager:
         )
 
     # Legacy method (kept for initial handshake or non-batch use)
-    def insert_waveform(self, session_id, raw_data, pressure=None, flow=None, mode=None, breath_idx=None):
+    def insert_waveform(self, session_id: str, raw_data: str, pressure: float | None = None, flow: float | None = None, mode: str | None = None, breath_idx: int | None = None) -> None:
+        """Insert a raw waveform message into the waveforms table.
+
+        Parameters
+        ----------
+        session_id : str
+            Active recording session identifier.
+        raw_data : str
+            Raw CSV payload from the PB980 waveform port.
+        pressure : float, optional
+            Parsed pressure value.
+        flow : float, optional
+            Parsed flow value.
+        mode : str, optional
+            Ventilation mode from raw data.
+        breath_idx : int, optional
+            Breath index for segmentation.
+        """
         ts = datetime.now().isoformat()
         self.conn.execute(
             "INSERT INTO waveforms (session_id, timestamp, raw_data, parsed_pressure, parsed_flow, vent_mode, breath_index) VALUES (?, ?, ?, ?, ?, ?, ?)",
             (session_id, ts, raw_data, pressure, flow, mode, breath_idx)
         )
 
-    def insert_setting(self, session_id, raw_data):
+    def insert_setting(self, session_id: str, raw_data: str) -> None:
+        """Insert a raw settings message into the settings table.
+
+        Parameters
+        ----------
+        session_id : str
+            Active recording session identifier.
+        raw_data : str
+            Raw CSV payload from the PB980 settings port.
+        """
         ts = datetime.now().isoformat()
         self.conn.execute("INSERT INTO settings (session_id, timestamp, raw_data) VALUES (?, ?, ?)",
                           (session_id, ts, raw_data))
         self.conn.commit()
 
-    def commit_batch(self):
+    def commit_batch(self) -> None:
+        """Flush pending inserts to the database."""
         if self.conn: self.conn.commit()
 
-    def close(self):
+    def close(self) -> None:
+        """Close the database connection."""
         if self.conn: self.conn.close()
 
 
@@ -272,7 +321,7 @@ class BreathMarkerPool:
     """
     POOL_SIZE = 20  # Max visible markers on screen at once
 
-    def __init__(self, plot_item):
+    def __init__(self, plot_item: pg.PlotItem) -> None:
         self.plot_item = plot_item
         self.pool = []
         self.active = {}  # seq_num -> pool_index
@@ -298,7 +347,7 @@ class BreathMarkerPool:
                 'seq_num': None
             })
 
-    def _get_free_slot(self):
+    def _get_free_slot(self) -> int:
         """Get an unused slot, or recycle the oldest active one."""
         for i, slot in enumerate(self.pool):
             if not slot['in_use']:
@@ -323,7 +372,16 @@ class BreathMarkerPool:
 
         return 0  # Fallback
 
-    def add_marker(self, seq_num, y_offset=0):
+    def add_marker(self, seq_num: str, y_offset: float = 0) -> None:
+        """Add a new breath marker to the pool.
+
+        Parameters
+        ----------
+        seq_num : str
+            Sequence number identifier for the breath marker.
+        y_offset : float, optional
+            Vertical offset for marker text placement (default: 0).
+        """
         if seq_num in self.active:
             return
 
@@ -343,7 +401,14 @@ class BreathMarkerPool:
 
         self.active[seq_num] = idx
 
-    def move_all(self, step_size):
+    def move_all(self, step_size: float) -> None:
+        """Move all active markers by a fixed step size and hide expired ones.
+
+        Parameters
+        ----------
+        step_size : float
+            Distance to translate all markers in the x-direction.
+        """
         expired = []
         for seq_num, idx in self.active.items():
             slot = self.pool[idx]
@@ -369,14 +434,36 @@ class BreathMarkerPool:
 # 3. SNAPSHOT WORKER (UPDATED WITH MODE MAPPINGS)
 # -----------------------------------------------------------------------------
 class SnapshotWorker(QThread):
-    def __init__(self, db_path, output_folder, patient_id):
+    """Background thread that periodically exports waveform data to EDF+ files.
+
+    Reads the most recent hour of waveform samples from the SQLite database,
+    constructs EDF+ files with pressure/flow signals at 50 Hz and breath
+    boundary annotations, and writes them atomically (temp file + rename)
+    to the output folder.
+
+    Parameters
+    ----------
+    db_path : str | Path
+        Path to the SQLite waveform database.
+    output_folder : Path
+        Directory for generated EDF files.
+    patient_id : str
+        Patient identifier used in the EDF header and filename.
+    """
+    def __init__(self, db_path: str | Path, output_folder: Path, patient_id: str) -> None:
         super().__init__()
         self.db_path = str(db_path)
         self.output_folder = output_folder
         self.patient_id = patient_id
         self.is_running = True
 
-    def run(self):
+    def run(self) -> None:
+        """Execute the snapshot loop until stopped.
+
+        Waits 10 seconds after start, then generates an EDF snapshot
+        every ~2 minutes. Errors are logged to ``edf_error_log.txt``
+        in the output folder rather than propagated.
+        """
         time.sleep(10)
         while self.is_running:
             # Wait ~2 minutes
@@ -400,7 +487,18 @@ class SnapshotWorker(QThread):
                 except:
                     pass
 
-    def generate_edf(self):
+    def generate_edf(self) -> None:
+        """Generate a single 1-hour EDF+ snapshot from the waveform database.
+
+        Queries all waveform rows with timestamps within the last hour,
+        maps them into pressure and flow numpy arrays at 50 Hz, attaches
+        breath-boundary annotations with ventilation mode labels, and
+        writes the result as an atomic temp-file-then-rename operation.
+
+        The output file is named ``{PatientID}_{Timestamp}_1H.edf``.
+        Any existing ``.edf`` files in the output folder are removed
+        before the new file is written.
+        """
         now_dt = datetime.now()
         cutoff = (now_dt - timedelta(hours=1)).isoformat()
 
@@ -582,6 +680,39 @@ class SnapshotWorker(QThread):
 # 4. VENTILATOR WORKER
 # -----------------------------------------------------------------------------
 class VentilatorWorker(QThread):
+    """Background thread for serial communication with PB980/PB840 ventilators.
+
+    Manages dual serial port connections (waveform at 38400 bps, settings
+    at 9600 bps), auto-identifies which port carries waveform vs. settings
+    data, and emits parsed events via Qt signals. Includes automatic
+    reconnection on cable disconnect with configurable timeout.
+
+    Parameters
+    ----------
+    patient_id : str
+        Patient identifier for this recording session.
+    db_path : str | Path
+        Path to the SQLite database for persisting waveform samples.
+
+    Attributes
+    ----------
+    sig_waveform_data : Signal(float, float)
+        Emitted for each parsed sample as ``(pressure, flow)``.
+    sig_breath_seq : Signal(str)
+        Emitted when a breath-start marker is detected, carrying the
+        sequence number assigned by the ventilator.
+    sig_settings_msg : Signal(str)
+        Emitted with a formatted string when a settings payload is parsed.
+    sig_status_update : Signal(str, str)
+        Emitted as ``(message, hex_color)`` for UI status bar updates.
+    sig_error : Signal(str)
+        Emitted on fatal errors requiring the session to stop.
+    sig_connection_lost : Signal
+        Emitted when a serial disconnect is detected.
+    sig_connection_restored : Signal
+        Emitted after a successful automatic reconnection.
+    """
+
     sig_status_update = Signal(str, str)
     sig_settings_msg = Signal(str)
     sig_waveform_data = Signal(float, float)
@@ -591,7 +722,7 @@ class VentilatorWorker(QThread):
     sig_connection_lost = Signal()
     sig_connection_restored = Signal()
 
-    def __init__(self, patient_id, db_path):
+    def __init__(self, patient_id: str, db_path: str | Path) -> None:
         super().__init__()
         self.patient_id = patient_id
         self.db_path = db_path
@@ -643,7 +774,8 @@ class VentilatorWorker(QThread):
         self.last_rx_emit_b = 0
         self.rx_throttle_interval = 0.1
 
-    def open_log_files(self):
+    def open_log_files(self) -> None:
+        """Open timestamped raw-data log files for this recording segment."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         self.current_file_date = datetime.now().date()
 
@@ -653,7 +785,8 @@ class VentilatorWorker(QThread):
         self.file_waveform = open(self.raw_data_folder / wf_name, 'a', encoding='utf-8', buffering=1)
         self.file_settings = open(self.raw_data_folder / st_name, 'a', encoding='utf-8', buffering=1)
 
-    def log_unidentified_data(self, source_port, data):
+    def log_unidentified_data(self, source_port: str, data: str) -> None:
+        """Log unidentified raw data during port initialization phase."""
         try:
             debug_file = self.logs_folder / "startup_debug_log.txt"
             with open(debug_file, "a", encoding='utf-8') as f:
@@ -663,7 +796,8 @@ class VentilatorWorker(QThread):
         except:
             pass
 
-    def check_file_rotation(self):
+    def check_file_rotation(self) -> None:
+        """Check and handle daily log file rotation."""
         now = time.monotonic()
         if now - self.last_rotation_check < 60: return
         self.last_rotation_check = now
@@ -674,7 +808,8 @@ class VentilatorWorker(QThread):
             self.open_log_files()
             self.sig_status_update.emit("RECORDING (Rotated)", "#00ff00")
 
-    def safe_write_file(self, file_handle, data):
+    def safe_write_file(self, file_handle: object, data: str) -> None:
+        """Write data to file with explicit sync and error suppression."""
         if file_handle:
             try:
                 file_handle.write(data)
@@ -683,17 +818,20 @@ class VentilatorWorker(QThread):
             except:
                 pass
 
-    def setup_system(self):
+    def setup_system(self) -> None:
+        """Initialize database manager and open log files."""
         # CHANGED: Use the passed DB path, not the system one
         self.db_manager = DatabaseManager(str(self.db_path))
         self.db_manager.connect()
         self.open_log_files()
 
-    def close_system(self):
+    def close_system(self) -> None:
+        """Close all open serial ports."""
         if self.port_a and self.port_a.is_open: self.port_a.close()
         if self.port_b and self.port_b.is_open: self.port_b.close()
 
-    def configure_port(self, port_obj, baud_rate):
+    def configure_port(self, port_obj: serial.Serial, baud_rate: int) -> None:
+        """Configure serial port parameters."""
         port_obj.baudrate = baud_rate
         port_obj.bytesize = serial.EIGHTBITS
         port_obj.parity = serial.PARITY_NONE
@@ -701,7 +839,15 @@ class VentilatorWorker(QThread):
         port_obj.reset_input_buffer()
         port_obj.reset_output_buffer()
 
-    def get_valid_ports(self):
+    def get_valid_ports(self) -> list[str]:
+        """Scan system COM ports for supported USB-to-serial adapters.
+
+        Returns
+        -------
+        list of str
+            Sorted, deduplicated list of COM port device names (e.g.
+            ``['COM3', 'COM4']``) matching known VID/PID pairs.
+        """
         valid_devices = []
         ports = serial.tools.list_ports.comports()
         for port in ports:
@@ -711,7 +857,17 @@ class VentilatorWorker(QThread):
                     break
         return sorted(list(set(valid_devices)))
 
-    def perform_reconnect_procedure(self):
+    def perform_reconnect_procedure(self) -> bool:
+        """Attempt to re-establish serial connections after a disconnect.
+
+        Closes existing ports and polls for two valid devices until
+        the reconnect timeout expires.
+
+        Returns
+        -------
+        bool
+            True if reconnection succeeded, False if timeout elapsed.
+        """
         self.sig_connection_lost.emit()
         self.sig_status_update.emit("CONNECTION LOST - RECONNECTING...", "#ffa500")
         try:
@@ -742,7 +898,8 @@ class VentilatorWorker(QThread):
             time.sleep(1.0)
         return False
 
-    def run(self):
+    def run(self) -> None:
+        """Execute the main event loop for serial communication."""
         self.is_running = True
         try:
             self.sig_status_update.emit("SCANNING PORTS...", "#ffff00")
@@ -858,7 +1015,8 @@ class VentilatorWorker(QThread):
             if self.file_waveform: self.file_waveform.close()
             if self.file_settings: self.file_settings.close()
 
-    def assign_ports(self, wave_port, set_port, init_buffer, name):
+    def assign_ports(self, wave_port: serial.Serial, set_port: serial.Serial, init_buffer: str, name: str) -> None:
+        """Assign waveform and settings serial ports and process initial buffer."""
         self.waveform_port = wave_port
         self.settings_port = set_port
         self.configure_port(self.settings_port, 9600)
@@ -872,7 +1030,19 @@ class VentilatorWorker(QThread):
     # -------------------------------------------------------------------------
     # NEW FIX: HIGH FIDELITY STORAGE (ONE ROW PER SAMPLE)
     # -------------------------------------------------------------------------
-    def handle_waveform(self, data):
+    def handle_waveform(self, data: str) -> None:
+        """Process incoming waveform serial data.
+
+        Writes raw data to the text log file, parses it via
+        `parse_incoming_chunk`, inserts parsed samples into the database
+        with interpolated timestamps, and emits Qt signals for the
+        real-time plot.
+
+        Parameters
+        ----------
+        data : str
+            Raw decoded bytes from the waveform serial port.
+        """
         # 1. Write to text file (This is the immutable "Black Box" log)
         self.safe_write_file(self.file_waveform, data)
 
@@ -933,16 +1103,43 @@ class VentilatorWorker(QThread):
         if batch_data:
             self.db_manager.insert_batch_waveforms(batch_data)
 
-    def handle_settings(self, data):
+    def handle_settings(self, data: str) -> None:
+        """Process incoming settings serial data."""
         self.safe_write_file(self.file_settings, data)
         self.db_manager.insert_setting(self.patient_id, data)
         self.process_settings_buffer(data)
 
     # --- NEW STATIC PARSER (PURE LOGIC) ---
     @staticmethod
-    def parse_incoming_chunk(current_buffer, new_chunk, max_size=8192):
-        """
-        Pure logic: Manages the buffer and extracts valid events.
+    def parse_incoming_chunk(current_buffer: str, new_chunk: str, max_size: int = 8192) -> tuple[str, list[tuple[str, ...]]]:
+        """Parse a chunk of serial data from the PB980 waveform port.
+
+        Accumulates partial lines in a buffer and extracts complete
+        waveform samples and breath markers as they arrive.
+
+        Parameters
+        ----------
+        current_buffer : str
+            Incomplete line fragment carried over from the previous call.
+        new_chunk : str
+            New bytes received from the serial port, decoded as ASCII.
+        max_size : int, optional
+            Maximum allowed buffer length before overflow reset (default 8192).
+
+        Returns
+        -------
+        remaining_buffer : str
+            Any incomplete trailing line to carry forward.
+        events : list of tuple
+            Parsed events, each one of:
+            - ``('DATA', pressure: float, flow: float)``
+            - ``('BREATH', sequence_number: str)``
+
+        Notes
+        -----
+        Overflow protection: if the combined buffer exceeds *max_size*,
+        returns ``("", [])`` to prevent unbounded memory growth from a
+        misbehaving serial device.
         """
         # 1. Update Buffer
         full_buffer = current_buffer + new_chunk
@@ -986,9 +1183,27 @@ class VentilatorWorker(QThread):
         return remaining_buffer, events
 
     @staticmethod
-    def parse_settings_chunk(current_buffer, new_chunk, max_size=8192):
-        """
-        Pure logic: Handles the specific CR-delimited CSV format of the PB980.
+    def parse_settings_chunk(current_buffer: str, new_chunk: str, max_size: int = 8192) -> tuple[str, list[str]]:
+        """Parse a chunk of serial data from the PB980 settings port.
+
+        The settings port sends CR-delimited CSV rows with 173+ fields.
+        This method extracts the ventilation mode string from fields 7-9.
+
+        Parameters
+        ----------
+        current_buffer : str
+            Incomplete line fragment from the previous call.
+        new_chunk : str
+            New bytes from the settings serial port.
+        max_size : int, optional
+            Maximum allowed buffer length (default 8192).
+
+        Returns
+        -------
+        remaining_buffer : str
+            Incomplete trailing data to carry forward.
+        messages : list of str
+            Formatted mode strings, e.g. ``"Mode: VC A/C VC"``.
         """
         full_buffer = current_buffer + new_chunk
         if len(full_buffer) > max_size:
@@ -1022,10 +1237,8 @@ class VentilatorWorker(QThread):
 
         return remaining_buffer, results
 
-    def process_settings_buffer(self, new_chunk):
-        """
-        Orchestrator for settings.
-        """
+    def process_settings_buffer(self, new_chunk: str) -> None:
+        """Parse settings data and update current ventilation mode state."""
         self.settings_line_buffer, messages = self.parse_settings_chunk(
             self.settings_line_buffer,
             new_chunk,
@@ -1038,14 +1251,16 @@ class VentilatorWorker(QThread):
                 self.current_vent_mode = msg.replace("Mode:", "").strip()
             self.sig_settings_msg.emit(msg)
 
-    def log_crash(self, e):
+    def log_crash(self, e: Exception) -> None:
+        """Log exception details to error log."""
         try:
             with open(self.logs_folder / "error_log.txt", "a") as f:
                 f.write(f"\n[CRASH {datetime.now()}] {str(e)}\n{traceback.format_exc()}\n")
         except:
             pass
 
-    def stop(self):
+    def stop(self) -> None:
+        """Signal the worker to stop and block until the thread exits."""
         self.is_running = False
         self.wait()
 
@@ -1054,7 +1269,15 @@ class VentilatorWorker(QThread):
 # 5. MAIN WINDOW
 # -----------------------------------------------------------------------------
 class VentilatorApp(QMainWindow):
-    def __init__(self):
+    """Main application window for the Syncron-E Waveform Recorder.
+
+    Provides real-time dual-channel waveform visualization (pressure and
+    flow) via PyQtGraph, session management with configurable auto-stop
+    rules, breath counting, disk-space monitoring, and an auto-lock safety
+    feature. Coordinates a `VentilatorWorker` for serial capture and a
+    `SnapshotWorker` for periodic EDF export.
+    """
+    def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("Syncron-E Waveform Recorder")
         self.setStyleSheet("background-color: #1e1e1e; color: #ffffff;")
@@ -1132,7 +1355,8 @@ class VentilatorApp(QMainWindow):
             QTimer.singleShot(500, lambda: QMessageBox.warning(self, "Config Reset", self.config_corrupt_msg))
 
 
-    def force_maintenance(self):
+    def force_maintenance(self) -> None:
+        """Run periodic garbage collection and clear Qt pixmap caches."""
         try:
             # 1. Force Python to reclaim circular references
             gc.collect()
@@ -1144,13 +1368,14 @@ class VentilatorApp(QMainWindow):
             # Swallow error to prevent timer from dying or leaking stack traces
             print(f"Maintenance Error: {e}")
 
-    def prevent_sleep(self):
+    def prevent_sleep(self) -> None:
+        """Prevent Windows from entering sleep mode during recording."""
         try:
             ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | 0x00000001 | 0x00000002)
         except:
             pass
 
-    def load_config(self):
+    def load_config(self) -> list[dict]:
         config_path = self.base_folder / ".config.json"
 
         # Defaults with Explicit Units
@@ -1197,7 +1422,7 @@ class VentilatorApp(QMainWindow):
             )
             return self._process_options(defaults)
 
-    def _process_options(self, raw_list):
+    def _process_options(self, raw_list: list[dict]) -> list[dict]:
         processed = []
         for i, item in enumerate(raw_list):
             if not all(k in item for k in ("label", "type", "value", "unit")):
@@ -1224,14 +1449,16 @@ class VentilatorApp(QMainWindow):
             processed.append(p_item)
         return processed
 
-    def log_debug(self, msg):
+    def log_debug(self, msg: str) -> None:
+        """Append a debug message to the application error log."""
         try:
             with open(self.base_folder / "error_log.txt", "a") as f:
                 f.write(f"[LOG {datetime.now()}] {msg}\n")
         except:
             pass
 
-    def init_ui(self):
+    def init_ui(self) -> None:
+        """Build the main window layout, graph widgets, and footer controls."""
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
@@ -1497,12 +1724,13 @@ class VentilatorApp(QMainWindow):
         layout.addWidget(self.plot_widget, 8)
         layout.addWidget(footer, 2)
 
-    def show_about_dialog(self):
+    def show_about_dialog(self) -> None:
+        """Display the About dialog."""
         # Modified to use the new interactive AboutDialog
         dlg = AboutDialog(self)
         dlg.exec()
 
-    def closeEvent(self, event: QCloseEvent):
+    def closeEvent(self, event: QCloseEvent) -> None:
         # FIX: Removed reference to undefined self.telemetry
         if self.is_logging or self.is_locked:
             msg = "Recording in progress!" if self.is_logging else "App is LOCKED."
@@ -1511,10 +1739,8 @@ class VentilatorApp(QMainWindow):
         else:
             event.accept()
 
-    def eventFilter(self, obj, event):
-        """
-        Detects user activity to reset the auto-lock timer.
-        """
+    def eventFilter(self, obj: object, event: QEvent) -> bool:
+        """Detects user activity to reset the auto-lock timer."""
         if event.type() in (QEvent.MouseMove, QEvent.MouseButtonPress,
                             QEvent.KeyPress, QEvent.Wheel):
             # Reset timer if app is not already locked
@@ -1523,10 +1749,8 @@ class VentilatorApp(QMainWindow):
 
         return super().eventFilter(obj, event)
 
-    def perform_auto_lock(self):
-        """
-        Called by timer. Only locks if currently unlocked.
-        """
+    def perform_auto_lock(self) -> None:
+        """Called by timer. Only locks if currently unlocked."""
         if not self.is_locked:
             self.toggle_lock()
             # Optional: status update so user knows why it happened
@@ -1535,7 +1759,8 @@ class VentilatorApp(QMainWindow):
             else:
                 self.status_lbl.setText("READY (Auto-Locked)")
 
-    def toggle_lock(self):
+    def toggle_lock(self) -> None:
+        """Toggle the UI lock state to prevent accidental interaction."""
         self.is_locked = not self.is_locked
         self.p_plot.getViewBox().setMouseEnabled(x=not self.is_locked, y=not self.is_locked)
         self.f_plot.getViewBox().setMouseEnabled(x=not self.is_locked, y=not self.is_locked)
@@ -1559,7 +1784,8 @@ class VentilatorApp(QMainWindow):
                 self.input_id.setEnabled(True)
                 self.combo_stop.setEnabled(True)
 
-    def check_input(self):
+    def check_input(self) -> None:
+        """Enable or disable the Start button based on patient ID input."""
         if self.is_logging or self.is_locked: return
         if self.input_id.text().strip():
             self.btn_action.setEnabled(True)
@@ -1570,9 +1796,9 @@ class VentilatorApp(QMainWindow):
             self.btn_action.setStyleSheet("background-color: #444; color: #888; border-radius: 5px;")
             self.btn_action.setToolTip("You must enter a Patient ID before recording can begin.")
 
-    def check_disk_space(self):
-        """
-        Robust disk space check.
+    def check_disk_space(self) -> int:
+        """Robust disk space check.
+
         If specific folder check fails, tries drive root.
         If both fail, returns a 'safe' large value (1TB) rather than blocking the user.
         """
@@ -1590,12 +1816,20 @@ class VentilatorApp(QMainWindow):
                 # so we don't block the user from recording.
                 return 1024 * 1024 * 1024 * 1024
 
-    def handle_worker_error(self, msg):
+    def handle_worker_error(self, msg: str) -> None:
+        """Handle a fatal error from the VentilatorWorker thread."""
         self.worker.stop()
         QMessageBox.critical(self, "Connection Error", msg)
         self.stop_logging_procedure("Error: " + msg)
 
-    def toggle_logging(self):
+    def toggle_logging(self) -> None:
+        """Start or stop a recording session.
+
+        When starting, validates disk space, creates a session-specific
+        SQLite database, launches the VentilatorWorker and SnapshotWorker
+        threads, and begins the render timer. When stopping, delegates
+        to `stop_logging_procedure`.
+        """
         if not self.is_logging:
             free_bytes = self.check_disk_space()
             if free_bytes < 500 * 1024 * 1024:
@@ -1684,7 +1918,15 @@ class VentilatorApp(QMainWindow):
         else:
             self.stop_logging_procedure("User Request")
 
-    def stop_logging_procedure(self, reason):
+    def stop_logging_procedure(self, reason: str) -> None:
+        """Tear down the active recording session.
+
+        Parameters
+        ----------
+        reason : str
+            Human-readable reason for stopping (e.g. "User Request",
+            "Time Limit (24 Hours)", "CRITICAL LOW DISK").
+        """
         if hasattr(self, 'worker') and self.worker:
             self.worker.stop()
 
@@ -1720,7 +1962,7 @@ class VentilatorApp(QMainWindow):
 
     # --- SELF HEALING HANDLERS ---
     @Slot()
-    def on_connection_lost(self):
+    def on_connection_lost(self) -> None:
         if self.is_reconnecting: return
         self.is_reconnecting = True
 
@@ -1733,14 +1975,14 @@ class VentilatorApp(QMainWindow):
         self.update_status("RECONNECTING...", "#ffa500")
 
     @Slot()
-    def on_connection_restored(self):
+    def on_connection_restored(self) -> None:
         if not self.is_reconnecting: return
         self.is_reconnecting = False
         self.segment_start_time = datetime.now()
         self.update_status("RECORDING (Recovered)", "#00ff00")
 
     @Slot(str)
-    def update_mode_display(self, text):
+    def update_mode_display(self, text: str) -> None:
         if "Mode:" in text:
             parts = text.split("Mode:", 1)
             if len(parts) > 1:
@@ -1751,13 +1993,13 @@ class VentilatorApp(QMainWindow):
             self.mode_lbl.setText(text)
 
     @Slot(str, str)
-    def update_status(self, msg, color):
+    def update_status(self, msg: str, color: str) -> None:
         if "LOGGING" in msg: msg = msg.replace("LOGGING", "RECORDING")
         self.status_lbl.setText(msg)
         self.status_dot.setStyleSheet(f"color: {color};")
 
     @Slot(str)
-    def update_breath_index(self, seq_num):
+    def update_breath_index(self, seq_num: str) -> None:
         html = f"<html><head/><body><span style='font-weight:600; color:#ffa500;'>Breath Index:</span> <span style='font-weight:400; color:#ffffff;'>#{seq_num}</span></body></html>"
         self.seq_lbl.setText(html)
 
@@ -1771,7 +2013,7 @@ class VentilatorApp(QMainWindow):
                 self.stop_logging_procedure(f"Breath Limit ({opt['value']})")
 
     @Slot(str)
-    def on_rx_activity(self, port_id):
+    def on_rx_activity(self, port_id: str) -> None:
         style = "background-color: #00ff00; border-radius: 8px; border: 1px solid #555;"
         if port_id == "A":
             self.led_a.setStyleSheet(style)
@@ -1781,7 +2023,16 @@ class VentilatorApp(QMainWindow):
             self.led_b_timer.start(50)
 
     @Slot(float, float)
-    def update_plot(self, p, f):
+    def update_plot(self, p: float, f: float) -> None:
+        """Queue a waveform sample for the next render cycle.
+
+        Parameters
+        ----------
+        p : float
+            Pressure value in cmH2O.
+        f : float
+            Flow value in L/min.
+        """
         marker_id = self.pending_seq_num
         self.pending_seq_num = None
         self.render_queue.append((p, f, marker_id))
@@ -1791,10 +2042,8 @@ class VentilatorApp(QMainWindow):
             if not self.is_reconnecting:
                 self.update_status("RECORDING", "#00ff00")
 
-    def render_loop(self):
-        """
-        Optimized Pacer (50Hz) using NumPy for zero-allocation updates.
-        """
+    def render_loop(self) -> None:
+        """Optimized Pacer (50Hz) using NumPy for zero-allocation updates."""
         if not self.is_logging: return
 
         # 1. TIME DELTA CALCULATION
@@ -1886,7 +2135,12 @@ class VentilatorApp(QMainWindow):
                 self.lbl_started.setText(self.session_start_time.strftime("%b %d @ %I:%M %p"))
                 self.ui_timer.start()
 
-    def update_ui_dashboard(self):
+    def update_ui_dashboard(self) -> None:
+        """Refresh the footer dashboard (duration, breath count, disk space).
+
+        Called once per second by the UI timer while recording is active.
+        Also enforces time-based auto-stop rules and disk-space limits.
+        """
         if not self.is_logging or not self.has_data_started: return
 
         total_sec = self.accumulated_duration

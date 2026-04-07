@@ -1,0 +1,81 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "syncrone-logger"
+version = "1.4.2"
+description = "High-fidelity PB980 ventilator waveform recorder for Syncron-E clinical studies"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.13"
+authors = [
+    { name = "Autonomous Healthcare, Inc.", email = "support@autonomoushealthcare.com" },
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Healthcare Industry",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: Microsoft :: Windows :: Windows 11",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Medical Science Apps.",
+]
+
+dependencies = [
+    "pyside6==6.10.1",
+    "numpy>=1.26.0",
+    "pyserial>=3.5",
+    "pyqtgraph>=0.13.3",
+    "edfio>=0.4.12",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8.0.0",
+    "pytest-qt>=4.2.0",
+    "pytest-mock>=3.12.0",
+    "pytest-cov>=4.1.0",
+    "pytest-html>=4.0.0",
+    "coverage>=7.0.0",
+]
+build = [
+    "nuitka==2.8.9",
+    "zstandard==0.25.0",
+    "setuptools>=68.0",
+]
+
+[project.urls]
+Repository = "https://github.com/AHC-Syncron-E/syncrone-logger"
+Issues = "https://github.com/AHC-Syncron-E/syncrone-logger/issues"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+qt_api = "pyside6"
+
+[tool.ruff]
+target-version = "py313"
+line-length = 120
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "B",     # flake8-bugbear
+    "UP",    # pyupgrade
+    "RUF",   # ruff-specific
+]
+ignore = [
+    "E501",  # line too long (handled by formatter)
+    "B904",  # raise-without-from-inside-except (too many to fix at once)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["main"]
+
+[tool.mypy]
+python_version = "3.13"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true

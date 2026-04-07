@@ -19,6 +19,7 @@ build/
 # Distribution
 *.msix
 *.appx
+*.zip
 payload/
 
 # Logs and Reports
@@ -35,8 +36,9 @@ Session_Databases/
 # Editor
 .vscode/
 .idea/
+
 # Internal development files
 GEMINI.md
 watchdog.py
 metadata.json
-logged_waveforms.txt
+environment.yml

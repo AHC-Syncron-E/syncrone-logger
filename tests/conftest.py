@@ -15,9 +15,6 @@ sys.path.insert(0, str(root_dir))
 # -------------------------------------------------------------------------
 # We mock these BEFORE 'main' is imported.
 
-# Mock Telemetry
-sys.modules['wandb'] = MagicMock()
-
 # Mock Serial
 sys.modules['serial'] = MagicMock()
 sys.modules['serial.tools'] = MagicMock()
