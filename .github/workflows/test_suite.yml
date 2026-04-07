@@ -27,7 +27,13 @@ jobs:
 
       - name: Install Dependencies
         run: |
-          pip install -r requirements.txt
+          pip install -e ".[test]"
+          pip install ruff
+
+      - name: Lint (ruff)
+        continue-on-error: true
+        run: |
+          ruff check . --output-format=github
 
       - name: Run Tests & Generate Reports
         env:

@@ -30,7 +30,7 @@ if getattr(sys, 'frozen', False):
         try:
             sys.stdout = open(os.devnull, 'w')
             sys.stderr = open(os.devnull, 'w')
-        except:
+        except Exception:
             pass
 
 import time
@@ -180,7 +180,7 @@ class DatabaseManager:
             if "vent_mode" not in columns or "breath_index" not in columns:
                 return True
             return False
-        except:
+        except (sqlite3.Error, OSError):
             return False
 
     def _get_tables(self, path: str | Path) -> list[str]:
@@ -191,7 +191,7 @@ class DatabaseManager:
             tables = [row[0] for row in cursor.fetchall()]
             temp_conn.close()
             return tables
-        except:
+        except (sqlite3.Error, OSError):
             return []
 
     def _backup_and_reset(self) -> None:
@@ -199,7 +199,7 @@ class DatabaseManager:
         backup_name = self.db_path.parent / f"syncrone_backup_SCHEMA_{timestamp}.db"
         try:
             shutil.move(str(self.db_path), str(backup_name))
-        except:
+        except OSError:
             pass
 
     def _create_tables(self) -> None:
@@ -484,7 +484,7 @@ class SnapshotWorker(QThread):
                 try:
                     with open(self.output_folder / "edf_error_log.txt", "a") as f:
                         f.write(f"[{datetime.now()}] EDF Gen Fail: {e}\n")
-                except:
+                except OSError:
                     pass
 
     def generate_edf(self) -> None:
@@ -664,7 +664,7 @@ class SnapshotWorker(QThread):
             try:
                 with open(self.output_folder / "edf_error_log.txt", "a") as f:
                     f.write(f"[{datetime.now()}] Write Failed: {e}\n")
-            except:
+            except OSError:
                 pass
 
             if temp_path.exists():
@@ -793,7 +793,7 @@ class VentilatorWorker(QThread):
                 clean = data.replace('\n', '\\n').replace('\r', '\\r')
                 ts = datetime.now().strftime("%H:%M:%S.%f")
                 f.write(f"[{ts}] [{source_port}] {clean}\n")
-        except:
+        except OSError:
             pass
 
     def check_file_rotation(self) -> None:
@@ -815,7 +815,7 @@ class VentilatorWorker(QThread):
                 file_handle.write(data)
                 file_handle.flush()
                 os.fsync(file_handle.fileno())
-            except:
+            except OSError:
                 pass
 
     def setup_system(self) -> None:
@@ -873,7 +873,7 @@ class VentilatorWorker(QThread):
         try:
             if self.port_a: self.port_a.close()
             if self.port_b: self.port_b.close()
-        except:
+        except (serial.SerialException, OSError):
             pass
         self.port_a = None
         self.port_b = None
@@ -984,7 +984,7 @@ class VentilatorWorker(QThread):
                             self.settings_port.write(msg.encode('ascii'))
                             self.settings_port.flush()
                             last_serial_write = now
-                        except:
+                        except (serial.SerialException, OSError):
                             pass
 
                     sleep_duration = next_wake - time.monotonic()
@@ -1256,7 +1256,7 @@ class VentilatorWorker(QThread):
         try:
             with open(self.logs_folder / "error_log.txt", "a") as f:
                 f.write(f"\n[CRASH {datetime.now()}] {str(e)}\n{traceback.format_exc()}\n")
-        except:
+        except OSError:
             pass
 
     def stop(self) -> None:
@@ -1372,7 +1372,7 @@ class VentilatorApp(QMainWindow):
         """Prevent Windows from entering sleep mode during recording."""
         try:
             ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | 0x00000001 | 0x00000002)
-        except:
+        except (AttributeError, OSError):
             pass
 
     def load_config(self) -> list[dict]:
@@ -1454,7 +1454,7 @@ class VentilatorApp(QMainWindow):
         try:
             with open(self.base_folder / "error_log.txt", "a") as f:
                 f.write(f"[LOG {datetime.now()}] {msg}\n")
-        except:
+        except OSError:
             pass
 
     def init_ui(self) -> None:
@@ -2177,7 +2177,7 @@ if __name__ == "__main__":
             log_path = Path.home() / "Desktop" / "Syncron-E Data" / "error_log.txt"
             with open(log_path, "a") as f:
                 f.write(f"\n[GUI CRASH {datetime.now()}]\n{error_msg}\n")
-        except:
+        except OSError:
             pass
         sys.__excepthook__(exctype, value, tb)
 

@@ -10,6 +10,70 @@ https://github.com/user-attachments/assets/35190ce7-5202-4cdf-be44-c5994cd247a7
 
 ---
 
+## Architecture
+
+### Data Flow
+
+```mermaid
+flowchart TD
+    PB980["PB980 Ventilator"] -->|"Serial 38400 bps (ASCII, 50 Hz)"| WW["VentilatorWorker (QThread)"]
+    PB980 -->|"Serial 9600 bps (CSV, on-demand)"| WW
+
+    WW -->|"parse_incoming_chunk()"| SIG1(["sig_waveform_data\n(pressure, flow)"])
+    WW -->|"parse_incoming_chunk()"| SIG2(["sig_breath_seq\n(sequence number)"])
+    WW -->|"parse_settings_chunk()"| SIG3(["sig_settings_msg\n(mode string)"])
+
+    SIG1 --> APP["VentilatorApp (QMainWindow)\nReal-time PyQtGraph"]
+    SIG2 --> APP
+    SIG3 --> APP
+
+    WW -->|"Batch INSERT (1 row/sample)"| DB["DatabaseManager\n(SQLite WAL)"]
+    DB -->|"SELECT last 1 hour"| SW["SnapshotWorker (QThread)"]
+    SW -->|"generate_edf()"| EDF["1-Hour EDF+ Files\n(Pressure + Flow @ 50 Hz\n+ Breath Annotations)"]
+```
+
+### Component Lifecycle
+
+```mermaid
+sequenceDiagram
+    participant User
+    participant App as VentilatorApp
+    participant VW as VentilatorWorker
+    participant SW as SnapshotWorker
+    participant DB as DatabaseManager
+
+    User->>App: Enter Patient ID, click Start
+    App->>DB: Create session database
+    App->>VW: start()
+    App->>SW: start()
+
+    VW->>VW: Scan COM ports, identify waveform vs. settings
+
+    loop Every 20ms (50 Hz)
+        VW->>VW: Read serial → parse_incoming_chunk()
+        VW-->>App: sig_waveform_data(pressure, flow)
+        VW-->>App: sig_breath_seq(seq_num)
+        VW->>DB: insert_batch_waveforms()
+    end
+
+    loop Every ~2 minutes
+        SW->>DB: Query last hour of samples
+        SW->>SW: generate_edf()
+        SW-->>SW: Write temp file → atomic rename
+    end
+
+    alt Serial disconnect
+        VW->>VW: perform_reconnect_procedure()
+        VW-->>App: sig_connection_lost / sig_connection_restored
+    end
+
+    User->>App: Click Stop
+    App->>VW: stop()
+    App->>SW: stop()
+```
+
+---
+
 ## Waveform Fidelity Validation
 
 The Syncron-E Waveform Recorder has been validated for waveform fidelity 
@@ -90,12 +154,17 @@ The application is deployed as a **Signed MSIX Package**, ensuring clean install
    cd syncrone-logger
    ```
 
-2. Install dependencies (Strict Pinned Versions):
+2. Install dependencies:
+   ```bash
+   pip install -e ".[test]"
+   ```
+
+   Or for runtime-only (no test tooling):
    ```bash
    pip install -r requirements.txt
    ```
 
-   *Note: We strictly pin `PySide6==6.10.1` and `Nuitka==2.8.9` to avoid memory leak regressions.*
+   *Note: We strictly pin `PySide6==6.10.1` to avoid memory leak regressions. See `pyproject.toml` for the full dependency specification.*
 
 3. Run the Recorder (Main App):
    ```bash

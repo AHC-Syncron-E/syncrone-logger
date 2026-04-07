@@ -1,52 +1,70 @@
-# Syncron-E Waveform Recorder - Automated Test Plan (v2)
+# Syncron-E Waveform Recorder -- Test Plan
 
-**Version:** 2.1
-**Status:** Core Pipeline Complete / UI Testing Pending
-**Last Updated:** Phase 4 Complete
+**Version:** 3.0
+**Status:** CI Pipeline Active
+**Last Updated:** 2026-04-06
 
 ---
 
-## 1. Accomplished Coverage
+## 1. Test Coverage Summary
 
-| Component | Status | Verification Method | Notes |
+| Component | Status | Test File | Method |
 | :--- | :--- | :--- | :--- |
-| **Waveform Parser** | ✅ **COMPLETE** | Unit Test (`test_pure_logic.py`) | Logic extracted to static method. Verified with "Golden Master" & Sabotage. |
-| **Settings Parser** | ✅ **COMPLETE** | Unit Test (`test_pure_logic.py`) | Verified against real PB980 binary payload. |
-| **Config Loader** | ✅ **COMPLETE** | Unit Test (`test_config.py`) | Mocked filesystem. Verified corruption fallback logic. |
-| **Database Persistence**| ✅ **COMPLETE** | Integration Test (`test_database.py`) | Verified Schema, WAL mode, and Data Integrity (Real SQLite file). |
-| **Reconnection Logic** | ✅ **COMPLETE** | Integration Test (`test_reconnection.py`) | Verified "Self-Healing" from SerialException. Includes safety monitor for worker crashes. |
+| Waveform Parser | Complete | `tests/unit/test_pure_logic.py` | Unit test against `parse_incoming_chunk()` static method |
+| Settings Parser | Complete | `tests/unit/test_pure_logic.py` | Unit test against `parse_settings_chunk()` static method |
+| Config Loader | Complete | `tests/unit/test_config.py` | Mocked filesystem, corruption fallback |
+| EDF Snapshot | Complete | `tests/unit/test_snapshot.py` | Real SQLite + edfio, atomic write |
+| Database Persistence | Complete | `tests/integration/test_database.py` | Real SQLite file, schema, WAL mode |
+| Reconnection Logic | Complete | `tests/integration/test_reconnection.py` | Mock serial, self-healing from SerialException |
+| UI Smoke Test | Complete | `tests/e2e/test_ui.py` | Headless Qt (offscreen), widget state |
+| Regression Baseline | Complete | `tests/test_regression_baseline.py` | Golden-master parsing, buffer overflow |
 
 ---
 
-## 2. Updated Architecture (Refactored for Testability)
+## 2. Architecture for Testability
 
-To enable robust testing without hardware, the monolithic `VentilatorWorker` was refactored. The parsing logic is now **pure functional code** decoupled from the Qt Thread loop.
+The parsing logic is implemented as **static pure-function methods** on `VentilatorWorker`, decoupled from the Qt thread loop and serial I/O:
 
-**Key Changes:**
-* `VentilatorWorker.parse_incoming_chunk(buffer, data)` -> Static method. Returns events list.
-* `VentilatorWorker.parse_settings_chunk(buffer, data)` -> Static method. Returns messages list.
-* `VentilatorWorker.process_waveform_buffer` -> Now acts as an orchestrator/signal-emitter only.
+- `VentilatorWorker.parse_incoming_chunk(buffer, data)` -- returns `(remaining_buffer, events)` list
+- `VentilatorWorker.parse_settings_chunk(buffer, data)` -- returns `(remaining_buffer, messages)` list
 
----
-
-## 3. Test Suite Inventory
-
-### Unit Tests (Fast, No Mocks needed)
-* `tests/unit/test_pure_logic.py`: Exhaustive testing of the static parsers (fragmentation, overflow, real binary payloads).
-* `tests/unit/test_config.py`: Tests user configuration loading, unit conversion, and error handling. (Uses heavy mocking of `VentilatorApp` to avoid GUI crashes).
-
-### Integration Tests (Real Components)
-* `tests/integration/test_database.py`: Tests `DatabaseManager` against a real file system. Verifies schema creation, high-volume inserts, and version migration.
-* `tests/integration/test_reconnection.py`: Tests the `VentilatorWorker`'s ability to survive a `SerialException` (cable pull) and resume automatically using a Mock Serial Factory.
-
-### Test Fixtures (`tests/conftest.py`)
-* **Global Mocks:** `serial`, `wandb`, `ctypes` are mocked at the module level.
-* **Fixtures:** `temp_db` (fresh SQLite file per test).
+This allows exhaustive unit testing without hardware, serial mocks, or GUI instantiation.
 
 ---
 
-## 4. Next Steps (Future Sessions)
+## 3. Test Fixtures (`tests/conftest.py`)
 
-1.  **UI "Smoke" Test:** Ensure the application launches without crashing on Windows.
-2.  **End-to-End Workflow:** Verify that clicking "Start" actually triggers the worker (connecting the GUI to the backend).
-3.  **CI Pipeline:** Finalize `.github/workflows/test_suite.yml` (Script already drafted).
+Pre-mocks applied **before** `import main`:
+
+- `serial`, `serial.tools`, `serial.tools.list_ports` -- prevents hardware access
+- `pyqtgraph` -- prevents OpenGL driver loading (critical for headless CI)
+
+Fixtures:
+
+- `mock_serial_ports` -- two mock COM ports with FTDI VID/PID
+- `temp_db` -- fresh `DatabaseManager` instance per test (real SQLite file in `tmp_path`)
+
+---
+
+## 4. Running Tests
+
+```bash
+# Full suite with coverage
+QT_QPA_PLATFORM=offscreen pytest tests/ --cov=main --cov-report=term
+
+# Single test file
+pytest tests/unit/test_pure_logic.py -v
+
+# Generate HTML reports (matches CI)
+pytest tests/ --cov=main --cov-report=html:coverage_html_report --html=test_results_report.html --self-contained-html
+```
+
+---
+
+## 5. CI Pipeline
+
+Tests run automatically on push and PR to `main` via `.github/workflows/test_suite.yml`:
+
+- **Platform:** `windows-latest` (matches deployment target)
+- **Python:** 3.13
+- **Artifacts:** Test results HTML report and coverage HTML report uploaded on every run
