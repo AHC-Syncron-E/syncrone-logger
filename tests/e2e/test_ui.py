@@ -1,7 +1,8 @@
-import pytest
-from PySide6.QtWidgets import QWidget, QPushButton, QLineEdit, QLabel, QComboBox
-from PySide6.QtCore import Qt
 from unittest.mock import MagicMock
+
+import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QComboBox, QLabel, QLineEdit, QPushButton
 
 # Import the application
 import main

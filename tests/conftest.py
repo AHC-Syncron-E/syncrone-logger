@@ -1,7 +1,7 @@
 import sys
-import os
 from pathlib import Path
 from unittest.mock import MagicMock
+
 import pytest
 
 # -------------------------------------------------------------------------
@@ -26,7 +26,7 @@ mock_pg = MagicMock()
 sys.modules['pyqtgraph'] = mock_pg
 
 # NOW it is safe to import main
-import main
+import main  # noqa: E402
 
 
 # -------------------------------------------------------------------------

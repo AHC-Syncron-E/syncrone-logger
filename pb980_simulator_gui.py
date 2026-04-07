@@ -1,18 +1,28 @@
+import os
 import sys
 import time
-import os
+from datetime import datetime
+from pathlib import Path
+
 import serial
 import serial.tools.list_ports
-import threading
-from pathlib import Path
-from datetime import datetime
+from PySide6.QtCore import QThread, Signal, Slot
 
 # GUI Components
-from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                               QHBoxLayout, QPushButton, QLabel, QFrame, QMessageBox,
-                               QComboBox, QPlainTextEdit, QGroupBox, QGridLayout)
-from PySide6.QtCore import Qt, QThread, Signal, Slot
-from PySide6.QtGui import QFont, QIcon, QColor, QTextCursor
+from PySide6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QMainWindow,
+    QMessageBox,
+    QPlainTextEdit,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 # --- CONFIGURATION ---
 BAUD_RATE_WAVE = 38400
@@ -72,10 +82,11 @@ def get_breaths(filepath):
     data_line_count = 0
     in_breath = False
 
-    with open(p, 'r', encoding='utf-8') as f:
+    with open(p, encoding='utf-8') as f:
         for line in f:
             clean = line.strip()
-            if not clean: continue
+            if not clean:
+                continue
 
             if clean.startswith("BS"):
                 in_breath = True
@@ -360,7 +371,7 @@ class SimulatorApp(QMainWindow):
             index_sett = self.combo_sett.findData(valid_ports[1])
             self.combo_sett.setCurrentIndex(index_sett)
 
-            self.log_msg(f"Auto-selected supported ports.", "#00ff00")
+            self.log_msg("Auto-selected supported ports.", "#00ff00")
         else:
             self.log_msg(f"Found {len(valid_ports)} supported cables. Please select manually.", "#ffa500")
 

@@ -17,10 +17,10 @@ jobs:
 
     steps:
       - name: Checkout Code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: '3.13'
           cache: 'pip'
@@ -31,7 +31,6 @@ jobs:
           pip install ruff
 
       - name: Lint (ruff)
-        continue-on-error: true
         run: |
           ruff check . --output-format=github
 
@@ -52,14 +51,14 @@ jobs:
 
       - name: Upload Test Result HTML
         if: always() # Upload even if tests fail so we can see WHY
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: Test-Results-Report
           path: test_results_report.html
 
       - name: Upload Coverage Report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: Coverage-Report
           path: coverage_html_report/

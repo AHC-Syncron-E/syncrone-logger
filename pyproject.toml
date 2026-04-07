@@ -73,6 +73,9 @@ ignore = [
     "B904",  # raise-without-from-inside-except (too many to fix at once)
 ]
 
+[tool.ruff.lint.per-file-ignores]
+"validation/*" = ["RUF001", "RUF002"]  # intentional Unicode in display strings (en dash, minus sign)
+
 [tool.ruff.lint.isort]
 known-first-party = ["main"]
 

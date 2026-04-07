@@ -1,7 +1,7 @@
-import pytest
-import time
-import sys
 from unittest.mock import MagicMock
+
+import pytest
+
 # Import main so we can patch its specific references
 import main
 from main import VentilatorWorker
@@ -30,7 +30,7 @@ class MockSerialDevice:
 
     def __init__(self, port_name, data_source, exception_class):
         self.port = port_name
-        self.clean_lines = [l.strip() for l in data_source.strip().split('\n')]
+        self.clean_lines = [line.strip() for line in data_source.strip().split('\n')]
         self.data_bytes = ("\n".join(self.clean_lines) + "\n").encode('latin-1')
         self.position = 0
         self.is_open = True

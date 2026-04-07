@@ -1,4 +1,3 @@
-import pytest
 from main import VentilatorWorker
 
 
@@ -23,7 +22,7 @@ class TestWaveformLogic:
         assert events == [('DATA', 20.0, 10.5)]
 
     def test_breath_marker(self):
-        buffer, events = VentilatorWorker.parse_incoming_chunk("", "BS, S:123,\n")
+        _buffer, events = VentilatorWorker.parse_incoming_chunk("", "BS, S:123,\n")
         assert events == [('BREATH', '123')]
 
     def test_buffer_overflow(self):

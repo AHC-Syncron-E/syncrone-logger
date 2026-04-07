@@ -1,8 +1,6 @@
-import pytest
 import sqlite3
-import os
 import time
-from pathlib import Path
+
 from main import DatabaseManager
 
 

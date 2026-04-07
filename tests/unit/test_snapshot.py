@@ -1,7 +1,8 @@
-import pytest
+import importlib.util
 import sqlite3
-import os
-from pathlib import Path
+
+import pytest
+
 from main import SnapshotWorker
 
 
@@ -47,7 +48,7 @@ class TestSnapshotWorker:
         conn = sqlite3.connect(str(db_path))
 
         # Insert 50 samples (1 second at 50Hz) to satisfy edfio requirements
-        for i in range(50):
+        for _ in range(50):
             conn.execute("""
                          INSERT INTO waveforms
                          (timestamp, raw_data, parsed_pressure, parsed_flow, vent_mode, breath_index)
@@ -69,9 +70,7 @@ class TestSnapshotWorker:
         generated_files = list(output_folder.glob("TEST_PATIENT_ID*.edf"))
 
         if len(generated_files) == 0:
-            try:
-                import edfio
-            except ImportError:
+            if importlib.util.find_spec("edfio") is None:
                 pytest.skip("EDF file not generated (edfio library missing)")
 
         assert len(generated_files) == 1

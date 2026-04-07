@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import sys
 import os
+import sys
 
 # -----------------------------------------------------------------------------
 # CRITICAL: MSIX/Nuitka "Zombie Pipe" Fix
@@ -33,24 +33,23 @@ if getattr(sys, 'frozen', False):
         except Exception:
             pass
 
-import time
-import math
 import ctypes
+import gc  # Required for explicit memory management in long-running threads
+import json
 import re
 import shutil
 import sqlite3
+import time
 import traceback
-import json
-import gc  # Required for explicit memory management in long-running threads
-from pathlib import Path
-from datetime import datetime, timedelta
 from collections import deque
+from datetime import datetime, timedelta
+from pathlib import Path
 
 # EDF and Math Libraries
 import numpy as np
 
 try:
-    from edfio import Edf, EdfSignal, EdfAnnotation, Patient
+    from edfio import Edf, EdfAnnotation, EdfSignal, Patient
 
     HAS_EDF_LIB = True
 except ImportError:
@@ -58,20 +57,38 @@ except ImportError:
     print("CRITICAL WARNING: 'edfio' library not found. Snapshots will fail.")
 
 # Serial Communication
-import serial
-import serial.tools.list_ports
-
-# GUI Components
-from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
-                               QHBoxLayout, QPushButton, QLabel, QFrame, QMessageBox,
-                               QLineEdit, QComboBox, QSizePolicy, QDialog, QDialogButtonBox,
-                               QGridLayout, QPlainTextEdit)
-from PySide6.QtCore import Qt, QThread, Signal, Slot, QTimer, QEvent, QRegularExpression
-from PySide6.QtGui import (QFont, QIcon, QColor, QCloseEvent, QPixmap,
-                           QMouseEvent, QTextCursor, QPixmapCache, QRegularExpressionValidator)
-
 # Graphing
 import pyqtgraph as pg
+import serial
+import serial.tools.list_ports
+from PySide6.QtCore import QEvent, QRegularExpression, Qt, QThread, QTimer, Signal, Slot
+from PySide6.QtGui import (
+    QCloseEvent,
+    QFont,
+    QIcon,
+    QMouseEvent,
+    QPixmap,
+    QPixmapCache,
+    QRegularExpressionValidator,
+)
+
+# GUI Components
+from PySide6.QtWidgets import (
+    QApplication,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 # FORCE Software Rasterization (Safety against OpenGL leaks in MSIX)
 pg.setConfigOption('useOpenGL', False)
@@ -174,7 +191,8 @@ class DatabaseManager:
             cursor.execute("PRAGMA table_info(waveforms)")
             columns = [info[1] for info in cursor.fetchall()]
             temp_conn.close()
-            if "waveforms" not in self._get_tables(self.db_path): return False
+            if "waveforms" not in self._get_tables(self.db_path):
+                return False
 
             # Check for new EDF columns
             if "vent_mode" not in columns or "breath_index" not in columns:
@@ -307,11 +325,13 @@ class DatabaseManager:
 
     def commit_batch(self) -> None:
         """Flush pending inserts to the database."""
-        if self.conn: self.conn.commit()
+        if self.conn:
+            self.conn.commit()
 
     def close(self) -> None:
         """Close the database connection."""
-        if self.conn: self.conn.close()
+        if self.conn:
+            self.conn.close()
 
 
 class BreathMarkerPool:
@@ -327,7 +347,7 @@ class BreathMarkerPool:
         self.active = {}  # seq_num -> pool_index
 
         # Pre-allocate all markers ONCE at startup
-        for i in range(self.POOL_SIZE):
+        for _ in range(self.POOL_SIZE):
             line = pg.InfiniteLine(pos=-999, angle=90,
                                    pen=pg.mkPen('#555', width=1, style=Qt.DashLine))
             text = pg.TextItem(text="", anchor=(0, 1), color="#ffa500")
@@ -468,10 +488,12 @@ class SnapshotWorker(QThread):
         while self.is_running:
             # Wait ~2 minutes
             for _ in range(120):
-                if not self.is_running: return
+                if not self.is_running:
+                    return
                 time.sleep(1)
 
-            if not self.is_running: return
+            if not self.is_running:
+                return
 
             try:
                 if HAS_EDF_LIB:
@@ -543,10 +565,12 @@ class SnapshotWorker(QThread):
         while True:
             # larger batch size for speed
             batch = cursor.fetchmany(10000)
-            if not batch: break
+            if not batch:
+                break
 
             for row in batch:
-                if i >= count: break  # Safety break
+                if i >= count:
+                    break  # Safety break
 
                 # Direct assignment
                 p_arr[i] = row[0] if row[0] is not None else 0.0
@@ -799,12 +823,15 @@ class VentilatorWorker(QThread):
     def check_file_rotation(self) -> None:
         """Check and handle daily log file rotation."""
         now = time.monotonic()
-        if now - self.last_rotation_check < 60: return
+        if now - self.last_rotation_check < 60:
+            return
         self.last_rotation_check = now
         if datetime.now().date() > self.current_file_date:
             self.sig_status_update.emit("ROTATING FILES...", "#00aaff")
-            if self.file_waveform: self.file_waveform.close()
-            if self.file_settings: self.file_settings.close()
+            if self.file_waveform:
+                self.file_waveform.close()
+            if self.file_settings:
+                self.file_settings.close()
             self.open_log_files()
             self.sig_status_update.emit("RECORDING (Rotated)", "#00ff00")
 
@@ -827,8 +854,10 @@ class VentilatorWorker(QThread):
 
     def close_system(self) -> None:
         """Close all open serial ports."""
-        if self.port_a and self.port_a.is_open: self.port_a.close()
-        if self.port_b and self.port_b.is_open: self.port_b.close()
+        if self.port_a and self.port_a.is_open:
+            self.port_a.close()
+        if self.port_b and self.port_b.is_open:
+            self.port_b.close()
 
     def configure_port(self, port_obj: serial.Serial, baud_rate: int) -> None:
         """Configure serial port parameters."""
@@ -871,8 +900,10 @@ class VentilatorWorker(QThread):
         self.sig_connection_lost.emit()
         self.sig_status_update.emit("CONNECTION LOST - RECONNECTING...", "#ffa500")
         try:
-            if self.port_a: self.port_a.close()
-            if self.port_b: self.port_b.close()
+            if self.port_a:
+                self.port_a.close()
+            if self.port_b:
+                self.port_b.close()
         except (serial.SerialException, OSError):
             pass
         self.port_a = None
@@ -882,7 +913,8 @@ class VentilatorWorker(QThread):
         while self.is_running:
             elapsed = time.monotonic() - self.start_wait
             remaining = self.reconnect_timeout_seconds - elapsed
-            if remaining <= 0: return False
+            if remaining <= 0:
+                return False
             self.sig_status_update.emit(f"RECONNECTING... ({int(remaining)}s)", "#ffa500")
             found = self.get_valid_ports()
             if len(found) == 2:
@@ -893,7 +925,7 @@ class VentilatorWorker(QThread):
                     self.port_b = serial.Serial(dev_b, timeout=0)
                     self.configure_port(self.port_b, 38400)
                     return True
-                except Exception as e:
+                except Exception:
                     pass
             time.sleep(1.0)
         return False
@@ -1011,9 +1043,12 @@ class VentilatorWorker(QThread):
             self.sig_error.emit(f"Runtime Error: {e}")
         finally:
             self.close_system()
-            if self.db_manager: self.db_manager.close()
-            if self.file_waveform: self.file_waveform.close()
-            if self.file_settings: self.file_settings.close()
+            if self.db_manager:
+                self.db_manager.close()
+            if self.file_waveform:
+                self.file_waveform.close()
+            if self.file_settings:
+                self.file_settings.close()
 
     def assign_ports(self, wave_port: serial.Serial, set_port: serial.Serial, init_buffer: str, name: str) -> None:
         """Assign waveform and settings serial ports and process initial buffer."""
@@ -1160,7 +1195,8 @@ class VentilatorWorker(QThread):
 
         for line in complete_lines:
             clean = line.strip()
-            if not clean: continue
+            if not clean:
+                continue
 
             if clean.startswith("BS"):
                 match = re.search(breath_pattern, clean)
@@ -1219,7 +1255,8 @@ class VentilatorWorker(QThread):
         results = []
         for line in complete_lines:
             clean = line.strip()
-            if not clean: continue
+            if not clean:
+                continue
 
             try:
                 parts = clean.split(',')
@@ -1255,7 +1292,7 @@ class VentilatorWorker(QThread):
         """Log exception details to error log."""
         try:
             with open(self.logs_folder / "error_log.txt", "a") as f:
-                f.write(f"\n[CRASH {datetime.now()}] {str(e)}\n{traceback.format_exc()}\n")
+                f.write(f"\n[CRASH {datetime.now()}] {e!s}\n{traceback.format_exc()}\n")
         except OSError:
             pass
 
@@ -1400,7 +1437,7 @@ class VentilatorApp(QMainWindow):
             return self._process_options(defaults)
 
         try:
-            with open(config_path, "r") as f:
+            with open(config_path) as f:
                 data = json.load(f)
 
             raw_options = data.get("options", [])
@@ -1650,7 +1687,8 @@ class VentilatorApp(QMainWindow):
         self.combo_stop.setToolTip("Automatically stop recording after a specific duration or breath count.")
         self.combo_stop.setStyleSheet(
             "padding: 5px; font-size: 14px; color: white; background: #333; border: 1px solid #555;")
-        for opt in self.auto_stop_options: self.combo_stop.addItem(opt["label"], opt)
+        for opt in self.auto_stop_options:
+            self.combo_stop.addItem(opt["label"], opt)
         cg_layout.addWidget(lbl_auto)
         cg_layout.addWidget(self.combo_stop)
 
@@ -1677,18 +1715,18 @@ class VentilatorApp(QMainWindow):
             vl = QVBoxLayout(w)
             vl.setSpacing(2)
 
-            l = QLabel(label)
-            l.setFont(dash_font_lbl)
-            l.setStyleSheet("color: #aaa;")
-            l.setFixedHeight(25)
-            l.setAlignment(Qt.AlignBottom | Qt.AlignHCenter)
+            label_widget = QLabel(label)
+            label_widget.setFont(dash_font_lbl)
+            label_widget.setStyleSheet("color: #aaa;")
+            label_widget.setFixedHeight(25)
+            label_widget.setAlignment(Qt.AlignBottom | Qt.AlignHCenter)
 
             v = QLabel(initial_val)
             v.setFont(dash_font_val)
             v.setStyleSheet(f"color: {color};")
             v.setAlignment(Qt.AlignTop | Qt.AlignHCenter)
 
-            vl.addWidget(l)
+            vl.addWidget(label_widget)
             vl.addWidget(v)
             return w, v
 
@@ -1786,7 +1824,8 @@ class VentilatorApp(QMainWindow):
 
     def check_input(self) -> None:
         """Enable or disable the Start button based on patient ID input."""
-        if self.is_logging or self.is_locked: return
+        if self.is_logging or self.is_locked:
+            return
         if self.input_id.text().strip():
             self.btn_action.setEnabled(True)
             self.btn_action.setStyleSheet("background-color: #007acc; color: white; border-radius: 5px;")
@@ -1842,7 +1881,8 @@ class VentilatorApp(QMainWindow):
                 if free_bytes < needed:
                     msg = f"Insufficient disk space for {opt['label']}.\nStart anyway?"
                     if QMessageBox.question(self, "Space Warning", msg,
-                                            QMessageBox.Yes | QMessageBox.No) == QMessageBox.No: return
+                                            QMessageBox.Yes | QMessageBox.No) == QMessageBox.No:
+                        return
 
             self.is_logging = True
             self.has_data_started = False
@@ -1873,7 +1913,8 @@ class VentilatorApp(QMainWindow):
 
             # Sanitize PID for filename (remove invalid chars)
             clean_pid = "".join(c for c in pid if c.isalnum() or c in "-_")
-            if not clean_pid: clean_pid = "Session"
+            if not clean_pid:
+                clean_pid = "Session"
 
             # Timestamp: YYYYMMDD_HHMMSS
             ts_str = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1963,7 +2004,8 @@ class VentilatorApp(QMainWindow):
     # --- SELF HEALING HANDLERS ---
     @Slot()
     def on_connection_lost(self) -> None:
-        if self.is_reconnecting: return
+        if self.is_reconnecting:
+            return
         self.is_reconnecting = True
 
         if self.segment_start_time:
@@ -1976,7 +2018,8 @@ class VentilatorApp(QMainWindow):
 
     @Slot()
     def on_connection_restored(self) -> None:
-        if not self.is_reconnecting: return
+        if not self.is_reconnecting:
+            return
         self.is_reconnecting = False
         self.segment_start_time = datetime.now()
         self.update_status("RECORDING (Recovered)", "#00ff00")
@@ -1994,7 +2037,8 @@ class VentilatorApp(QMainWindow):
 
     @Slot(str, str)
     def update_status(self, msg: str, color: str) -> None:
-        if "LOGGING" in msg: msg = msg.replace("LOGGING", "RECORDING")
+        if "LOGGING" in msg:
+            msg = msg.replace("LOGGING", "RECORDING")
         self.status_lbl.setText(msg)
         self.status_dot.setStyleSheet(f"color: {color};")
 
@@ -2044,7 +2088,8 @@ class VentilatorApp(QMainWindow):
 
     def render_loop(self) -> None:
         """Optimized Pacer (50Hz) using NumPy for zero-allocation updates."""
-        if not self.is_logging: return
+        if not self.is_logging:
+            return
 
         # 1. TIME DELTA CALCULATION
         now = time.monotonic()
@@ -2069,8 +2114,10 @@ class VentilatorApp(QMainWindow):
 
         # Queue Overflow Protection
         queue_len = len(self.render_queue)
-        if queue_len > 100: count_to_pop += 1
-        if queue_len > 300: count_to_pop += 5
+        if queue_len > 100:
+            count_to_pop += 1
+        if queue_len > 300:
+            count_to_pop += 5
 
         did_update = False
 
@@ -2141,7 +2188,8 @@ class VentilatorApp(QMainWindow):
         Called once per second by the UI timer while recording is active.
         Also enforces time-based auto-stop rules and disk-space limits.
         """
-        if not self.is_logging or not self.has_data_started: return
+        if not self.is_logging or not self.has_data_started:
+            return
 
         total_sec = self.accumulated_duration
         if self.segment_start_time and not self.is_reconnecting:
