@@ -451,6 +451,90 @@ class BreathMarkerPool:
 
 
 # -----------------------------------------------------------------------------
+# 2b. VENTILATION-MODE CANONICALIZATION
+# -----------------------------------------------------------------------------
+# KEEP IN SYNC WITH syncrone-library src/syncrone_library/io/__init__.py
+# (VENT_MODE_MAP / VENT_MODE_SUBSTRING_MAP / normalize_vent_mode).
+#
+# The recorder stores the raw composite PB980 mode string in the SQLite
+# ``vent_mode`` column (e.g. "VC A/C", "VC+ A/C", "PS SPONT", "VC+ PS SIMV").
+# The analysis library (syncrone-library) canonicalizes these to VCV / PCV /
+# PSV for ineffective-effort scoring, and passes every other mode (SIMV,
+# BiLevel, CPAP, bare SPONT, ...) through UNCHANGED — those are intentionally
+# ineligible for scoring, so we must NOT invent a VCV/PCV label for them.
+#
+# NOTE: VC+ ("volume-targeted pressure control") maps to PCV, not VCV. The
+# previous hard-coded whitelist in generate_edf() mislabelled it as VCV and
+# also stripped the '+' and '/' characters that distinguish it. See Defect B.
+VENT_MODE_MAP = {
+    "A/C VC": "VCV",
+    "VC A/C": "VCV",
+    "A/C VC+": "PCV",
+    "VC+ A/C": "PCV",
+    "A/C PC": "PCV",
+    "PC A/C": "PCV",
+}
+
+VENT_MODE_SUBSTRING_MAP = [
+    ("SPONT PS", "PSV"),
+    ("PS SPONT", "PSV"),
+]
+
+# Characters allowed to survive into an EDF+ annotation mode token.
+# '-' is EXCLUDED because the annotation is stored as "{mode}-{breath_index}"
+# and later split on '-' by both this recorder and syncrone-library; a '-' in
+# the mode would corrupt that split. '+' and '/' ARE allowed (the old code
+# stripped them, destroying the VC+ and A/C distinctions).
+_MODE_TOKEN_ALLOWED = set(" +/_.")
+
+
+def canonicalize_vent_mode(raw_mode: str | None) -> str:
+    """Map a raw PB980 composite mode string to a canonical EDF mode token.
+
+    Mirrors ``syncrone_library.io.normalize_vent_mode``: exact-match modes are
+    canonicalized to VCV / PCV / PSV, spontaneous pressure-support variants map
+    to PSV via substring match, and everything else is passed through as an
+    EDF-annotation-safe token (control characters and the '-' delimiter
+    removed, '+' and '/' preserved).
+
+    Parameters
+    ----------
+    raw_mode : str | None
+        Composite mode string as stored in the ``vent_mode`` column, e.g.
+        ``"VC A/C"``, ``"VC+ A/C"``, ``"PS SPONT"``, ``"VC+ PS SIMV"``.
+
+    Returns
+    -------
+    str
+        Canonical label (``"VCV"``/``"PCV"``/``"PSV"``), a sanitized
+        passthrough of *raw_mode*, or ``"Unknown"`` when absent/blank.
+    """
+    if not raw_mode:
+        return "Unknown"
+
+    cleaned = raw_mode.strip()
+    if not cleaned:
+        return "Unknown"
+
+    # 1. Exact canonical match (volume/pressure control A/C variants).
+    if cleaned in VENT_MODE_MAP:
+        return VENT_MODE_MAP[cleaned]
+
+    # 2. Substring match (spontaneous pressure support -> PSV).
+    for substr, mode in VENT_MODE_SUBSTRING_MAP:
+        if substr in cleaned:
+            return mode
+
+    # 3. Passthrough, sanitized for EDF+ annotation safety.
+    sanitized = "".join(
+        c for c in cleaned if c.isalnum() or c in _MODE_TOKEN_ALLOWED
+    )
+    # Collapse any whitespace runs introduced by removed characters.
+    sanitized = " ".join(sanitized.split())
+    return sanitized if sanitized else "Unknown"
+
+
+# -----------------------------------------------------------------------------
 # 3. SNAPSHOT WORKER (UPDATED WITH MODE MAPPINGS)
 # -----------------------------------------------------------------------------
 class SnapshotWorker(QThread):
@@ -557,7 +641,25 @@ class SnapshotWorker(QThread):
         active_breath_onset = 0.0
         active_breath_count = 0
         active_mode_str = "Unknown"
+        active_raw_mode = "Unknown"
         # --------------------------------------------
+
+        def emit_breath(onset: float, count: int, mode_str: str, raw_str: str, breath_idx: int) -> None:
+            """Append the canonical breath annotation and, when the raw
+            composite mode differs (i.e. canonicalization was lossy), an
+            informational annotation preserving the raw ground-truth mode.
+
+            The raw annotation is tagged ``mode_raw:`` so it never parses as a
+            ``{mode}-{index}`` breath annotation downstream (syncrone-library
+            splits on '-' and skips non-conforming text)."""
+            duration_sec = round(count / float(fs), 2)
+            annotations.append(
+                EdfAnnotation(onset=onset, duration=duration_sec, text=f"{mode_str}-{breath_idx}")
+            )
+            if raw_str and raw_str != mode_str:
+                annotations.append(
+                    EdfAnnotation(onset=onset, duration=0.0, text=f"mode_raw:{raw_str}")
+                )
 
         # Use a counter for array indexing
         i = 0
@@ -587,29 +689,24 @@ class SnapshotWorker(QThread):
 
                         # 1. Close out the PREVIOUS breath (if one existed)
                         if active_breath_idx is not None:
-                            duration_sec = round(active_breath_count / float(fs), 2)
-                            text = f"{active_mode_str}-{active_breath_idx}"
-
-                            # We replace duration=None with the actual calculated seconds
-                            annot = EdfAnnotation(
-                                onset=active_breath_onset,
-                                duration=duration_sec,
-                                text=text
+                            emit_breath(
+                                active_breath_onset,
+                                active_breath_count,
+                                active_mode_str,
+                                active_raw_mode,
+                                active_breath_idx,
                             )
-                            annotations.append(annot)
 
                         # 2. Initialize the NEW breath
                         active_breath_idx = current_idx
                         active_breath_onset = i / float(fs)
                         active_breath_count = 1 # Start counting samples for this new breath
 
-                        # Parse the mode string once at the start of the breath
-                        if raw_mode.strip() in ["VC A/C", "VC", "VC+ A/C", "VC+"]:
-                            active_mode_str = "VCV"
-                        elif raw_mode.strip() in ["PC A/C", "PC"]:
-                            active_mode_str = "PCV"
-                        else:
-                            active_mode_str = "".join(c for c in raw_mode if c.isalnum() or c in " -_.")
+                        # Canonicalize the mode once at the start of the breath.
+                        # See canonicalize_vent_mode() and Defect B: VC+ -> PCV,
+                        # SIMV/BiLevel/CPAP pass through, '+' and '/' preserved.
+                        active_raw_mode = raw_mode.strip() or "Unknown"
+                        active_mode_str = canonicalize_vent_mode(raw_mode)
 
                     else:
                         # Same breath index, just increment the sample counter
@@ -621,14 +718,13 @@ class SnapshotWorker(QThread):
 
         # --- EDGE CASE: Save the very last breath tracked ---
         if active_breath_idx is not None:
-            duration_sec = round(active_breath_count / float(fs), 2)
-            text = f"{active_mode_str}-{active_breath_idx}"
-            annot = EdfAnnotation(
-                onset=active_breath_onset,
-                duration=duration_sec,
-                text=text
+            emit_breath(
+                active_breath_onset,
+                active_breath_count,
+                active_mode_str,
+                active_raw_mode,
+                active_breath_idx,
             )
-            annotations.append(annot)
         # ----------------------------------------------------
 
         # 4. Truncate if we fetched fewer rows than expected (or remainder)
