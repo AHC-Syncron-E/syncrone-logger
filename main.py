@@ -134,6 +134,40 @@ def edf_availability_warning(has_edf_lib: bool) -> str | None:
         )
     return None
 
+
+# Number of consecutive EDF-generation failures before the UI is alerted (H3).
+EDF_FAILURE_ALERT_THRESHOLD = 3
+
+
+def update_edf_failure_state(
+    consecutive_failures: int, success: bool, threshold: int = EDF_FAILURE_ALERT_THRESHOLD
+) -> tuple[int, bool]:
+    """Advance the consecutive-EDF-failure counter and decide whether to alert.
+
+    H3: EDF generation failures were only written to a log file while the UI
+    kept showing "RECORDING". This pure helper tracks consecutive failures and
+    fires a one-shot alert exactly when the count first reaches *threshold*; a
+    success resets the counter (so a later burst can alert again).
+
+    Parameters
+    ----------
+    consecutive_failures : int
+        Current consecutive-failure count before this attempt.
+    success : bool
+        Whether the just-completed generate_edf attempt succeeded.
+    threshold : int, optional
+        Consecutive failures required to alert (default ``EDF_FAILURE_ALERT_THRESHOLD``).
+
+    Returns
+    -------
+    tuple[int, bool]
+        ``(new_count, should_alert)``.
+    """
+    if success:
+        return 0, False
+    new_count = consecutive_failures + 1
+    return new_count, new_count == threshold
+
 # -----------------------------------------------------------------------------
 # 0. HELPER UI CLASSES
 # -----------------------------------------------------------------------------
@@ -597,13 +631,24 @@ class SnapshotWorker(QThread):
         Directory for generated EDF files.
     patient_id : str
         Patient identifier used in the EDF header and filename.
+
+    Attributes
+    ----------
+    sig_edf_alert : Signal(str)
+        Emitted after ``EDF_FAILURE_ALERT_THRESHOLD`` consecutive
+        ``generate_edf`` failures so the UI can surface the problem (H3).
     """
+
+    sig_edf_alert = Signal(str)
+
     def __init__(self, db_path: str | Path, output_folder: Path, patient_id: str) -> None:
         super().__init__()
         self.db_path = str(db_path)
         self.output_folder = output_folder
         self.patient_id = patient_id
         self.is_running = True
+        # H3: consecutive generate_edf failure counter for the UI alert.
+        self._edf_failures = 0
         # C1: path of THIS session's most recent snapshot, removed only after
         # the next snapshot is written successfully. Never glob-delete others'.
         self._last_written_path = None
@@ -636,21 +681,34 @@ class SnapshotWorker(QThread):
             if not self.is_running:
                 return
 
+            status = None
             try:
                 if HAS_EDF_LIB:
-                    self.generate_edf()
+                    status = self.generate_edf()
                     # FORCE CLEANUP after big allocation
                     gc.collect()
-                else:
-                    pass
             except Exception as e:
+                status = False
                 try:
                     with open(self.output_folder / "edf_error_log.txt", "a") as f:
                         f.write(f"[{datetime.now()}] EDF Gen Fail: {e}\n")
                 except OSError:
                     pass
 
-    def generate_edf(self) -> None:
+            # H3: count only definitive outcomes (True/False). ``None`` means
+            # "not enough data yet" and is neither success nor failure.
+            if status is not None:
+                self._edf_failures, should_alert = update_edf_failure_state(
+                    self._edf_failures, success=status
+                )
+                if should_alert:
+                    self.sig_edf_alert.emit(
+                        "EDF snapshot generation has failed repeatedly. "
+                        "Recordings may be incomplete - check disk space and "
+                        "the output folder."
+                    )
+
+    def generate_edf(self) -> bool | None:
         """Generate a single 1-hour EDF+ snapshot from the waveform database.
 
         Queries all waveform rows with timestamps within the last hour,
@@ -662,6 +720,13 @@ class SnapshotWorker(QThread):
         Only this session's own previous snapshot is removed, and only after
         the new file is written successfully; other sessions'/patients' EDFs
         in the folder are left untouched.
+
+        Returns
+        -------
+        bool | None
+            ``True`` if an EDF file was written, ``False`` on a write failure,
+            or ``None`` when there is not yet enough data to snapshot. Used by
+            the run loop's consecutive-failure alerting (H3).
         """
         now_dt = datetime.now()
         cutoff = (now_dt - timedelta(hours=1)).isoformat()
@@ -677,7 +742,7 @@ class SnapshotWorker(QThread):
         fs = 50
         if count < fs:
             conn.close()
-            return
+            return None
 
         # C2: derive the EDF start timestamp from the FIRST selected sample,
         # not a fixed "now - 1 hour" (which mis-dated sub-hour captures by up
@@ -842,6 +907,7 @@ class SnapshotWorker(QThread):
         # OWN previous snapshot. We never glob-delete the folder, so other
         # sessions'/patients' EDFs are preserved, and a failed write never
         # leaves us with zero EDFs.
+        write_ok = False
         try:
             edf.write(str(temp_path))
             if temp_path.exists():
@@ -857,6 +923,7 @@ class SnapshotWorker(QThread):
                     except OSError:
                         pass
                 self._last_written_path = final_path
+                write_ok = True
         except Exception as e:
             try:
                 with open(self.output_folder / "edf_error_log.txt", "a") as f:
@@ -871,6 +938,10 @@ class SnapshotWorker(QThread):
         del p_arr
         del f_arr
         gc.collect()
+
+        # H3: report definitive success/failure so the run loop can alert on
+        # repeated failures.
+        return write_ok
 
 
 # -----------------------------------------------------------------------------
@@ -2174,6 +2245,7 @@ class VentilatorApp(QMainWindow):
 
             # 2. Snapshot Worker (Pass the SAME DB path)
             self.snapshot_worker = SnapshotWorker(full_db_path, self.base_folder, pid)
+            self.snapshot_worker.sig_edf_alert.connect(self.on_edf_alert)
             self.snapshot_worker.start()
 
             self.last_pkt_time = time.monotonic()
@@ -2287,6 +2359,12 @@ class VentilatorApp(QMainWindow):
         elif port_id == "B":
             self.led_b.setStyleSheet(style)
             self.led_b_timer.start(50)
+
+    @Slot(str)
+    def on_edf_alert(self, msg: str) -> None:
+        """H3: surface repeated EDF-generation failures in the status bar."""
+        self.update_status("WARNING: EDF EXPORT FAILING", "#ff0000")
+        self.log_debug(f"EDF ALERT: {msg}")
 
     @Slot(float, float)
     def update_plot(self, p: float, f: float) -> None:
