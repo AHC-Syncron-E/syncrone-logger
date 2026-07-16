@@ -13,6 +13,7 @@ These tests pin the corrected lifecycle:
 
 import importlib.util
 import sqlite3
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -20,6 +21,10 @@ from main import SnapshotWorker
 
 edfio_missing = importlib.util.find_spec("edfio") is None
 pytestmark = pytest.mark.skipif(edfio_missing, reason="edfio library missing")
+
+# Recent timestamp within the 1-hour snapshot window and a valid EDF start
+# date (edfio only accepts 1985-2084).
+RECENT_TS = (datetime.now() - timedelta(minutes=5)).isoformat()
 
 
 def _seed(db_path, n=60):
@@ -37,7 +42,7 @@ def _seed(db_path, n=60):
         conn.execute(
             "INSERT INTO waveforms (timestamp, raw_data, parsed_pressure, parsed_flow, vent_mode, breath_index)"
             " VALUES (?, ?, ?, ?, ?, ?)",
-            ("9999-12-31T23:59:59", None, 15.0 + (i % 8), -3.0 + (i % 5), "VC A/C", 1 if i < 30 else 2),
+            (RECENT_TS, None, 15.0 + (i % 8), -3.0 + (i % 5), "VC A/C", 1 if i < 30 else 2),
         )
     conn.commit()
     conn.close()

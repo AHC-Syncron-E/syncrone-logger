@@ -644,6 +644,20 @@ class SnapshotWorker(QThread):
             conn.close()
             return
 
+        # C2: derive the EDF start timestamp from the FIRST selected sample,
+        # not a fixed "now - 1 hour" (which mis-dated sub-hour captures by up
+        # to ~59 minutes). ORDER BY id ASC matches the sample write order.
+        cursor.execute(
+            "SELECT timestamp FROM waveforms WHERE timestamp > ? ORDER BY id ASC LIMIT 1",
+            (cutoff,),
+        )
+        first_ts_row = cursor.fetchone()
+        try:
+            start_time_obj = datetime.fromisoformat(first_ts_row[0])
+        except (TypeError, ValueError, IndexError):
+            # Defensive fallback if the timestamp is missing/unparseable.
+            start_time_obj = now_dt - timedelta(hours=1)
+
         # 2. Pre-allocate Numpy Arrays
         p_arr = np.zeros(count, dtype=np.float32)
         f_arr = np.zeros(count, dtype=np.float32)
@@ -779,8 +793,7 @@ class SnapshotWorker(QThread):
             clean_pid = "Unknown_Patient"
         edf.patient = Patient(name=clean_pid)
 
-        # Date/Time setup
-        start_time_obj = now_dt - timedelta(hours=1)
+        # Date/Time setup (start_time_obj derived from the first sample above)
         edf.startdate = start_time_obj.date()
         edf.starttime = start_time_obj.time()
 

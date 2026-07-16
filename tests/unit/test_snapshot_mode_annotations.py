@@ -9,6 +9,7 @@ silently destroyed).
 
 import importlib.util
 import sqlite3
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -16,6 +17,10 @@ from main import SnapshotWorker
 
 edfio_missing = importlib.util.find_spec("edfio") is None
 pytestmark = pytest.mark.skipif(edfio_missing, reason="edfio library missing")
+
+# Recent timestamp within the 1-hour window and a valid EDF start date
+# (edfio only accepts 1985-2084).
+RECENT_TS = (datetime.now() - timedelta(minutes=5)).isoformat()
 
 
 def _seed_two_breaths(db_path, vent_mode):
@@ -47,7 +52,7 @@ def _seed_two_breaths(db_path, vent_mode):
             (timestamp, raw_data, parsed_pressure, parsed_flow, vent_mode, breath_index)
             VALUES (?, ?, ?, ?, ?, ?)
             """,
-            ("9999-12-31T23:59:59", None, pressure, flow, vent_mode, breath_idx),
+            (RECENT_TS, None, pressure, flow, vent_mode, breath_idx),
         )
     conn.commit()
     conn.close()
