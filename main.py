@@ -99,6 +99,25 @@ pg.setConfigOption('enableExperimental', False)
 # -----------------------------------------------------------------------------
 APP_VERSION = "1.4.2"  # Bumped for Memory Fixes
 
+# Minimum comma-separated field count for a complete MISCF settings frame.
+# The MISCF response to SNDF ends at Field 171 (PB840) or Field 173 (PB980)
+# right before <ETX>. Accepting >= 171 handles BOTH ventilator models while
+# still rejecting genuinely truncated/short frames. The mode lives in fields
+# 7/8/9, well within 171. (Defect A: the old >=173 guard silently rejected
+# every PB840 frame, pinning the mode to "Unknown" for the whole session.)
+MIN_SETTINGS_FIELDS = 171
+
+
+def should_warn_unknown_mode(mode: str | None) -> bool:
+    """Return True when the current ventilation mode is absent/placeholder.
+
+    Used to surface a visible warning during recording so that a session
+    stuck on the ``"Unknown"`` fallback (e.g. no settings cable, or a device
+    whose frames never parse) is never silent. Pure so it can be unit-tested
+    without Qt/serial.
+    """
+    return not mode or not mode.strip() or mode.strip() == "Unknown"
+
 # -----------------------------------------------------------------------------
 # 0. HELPER UI CLASSES
 # -----------------------------------------------------------------------------
@@ -852,6 +871,10 @@ class VentilatorWorker(QThread):
         self.current_vent_mode = "Unknown"
         self.current_breath_index = 0
 
+        # Defect A: unknown-mode warning latch (set once ports are identified).
+        self._ports_identified_at = 0.0
+        self._unknown_mode_warned = False
+
         # --- PATH LOGIC ---
         self.root_folder = Path.home() / "Desktop" / "Syncron-E Data"
 
@@ -1107,13 +1130,30 @@ class VentilatorWorker(QThread):
                         last_db_commit = now
 
                     if ports_identified and (now - last_serial_write >= 5.0):
-                        msg = "SNDF\r"
-                        try:
-                            self.settings_port.write(msg.encode('ascii'))
-                            self.settings_port.flush()
-                            last_serial_write = now
-                        except (serial.SerialException, OSError):
-                            pass
+                        self.poll_settings_frame()
+                        last_serial_write = now
+
+                    # Defect A: surface a VISIBLE warning if, well after port
+                    # identification, we still have no real ventilation mode
+                    # (e.g. PB840 frames that never parsed, or no settings
+                    # cable). One-shot latch so we neither spam nor stay silent.
+                    if (
+                        ports_identified
+                        and not self._unknown_mode_warned
+                        and (now - self._ports_identified_at) >= 15.0
+                        and should_warn_unknown_mode(self.current_vent_mode)
+                    ):
+                        self._unknown_mode_warned = True
+                        self.sig_status_update.emit(
+                            "WARNING: ventilation mode UNKNOWN (check settings cable)",
+                            "#ffa500",
+                        )
+                        self.log_crash(
+                            RuntimeError(
+                                "Ventilation mode still 'Unknown' 15s after port "
+                                "identification; settings frames are not parsing."
+                            )
+                        )
 
                     sleep_duration = next_wake - time.monotonic()
                     if sleep_duration > 0:
@@ -1146,6 +1186,16 @@ class VentilatorWorker(QThread):
             if self.file_settings:
                 self.file_settings.close()
 
+    def poll_settings_frame(self) -> None:
+        """Request a fresh MISCF settings frame (SNDF) from the ventilator."""
+        if not self.settings_port:
+            return
+        try:
+            self.settings_port.write(b"SNDF\r")
+            self.settings_port.flush()
+        except (serial.SerialException, OSError):
+            pass
+
     def assign_ports(self, wave_port: serial.Serial, set_port: serial.Serial, init_buffer: str, name: str) -> None:
         """Assign waveform and settings serial ports and process initial buffer."""
         self.waveform_port = wave_port
@@ -1154,6 +1204,15 @@ class VentilatorWorker(QThread):
         w_name = self.waveform_port.port
         s_name = self.settings_port.port
         self.sig_status_update.emit(f"RECORDING | Wave: {w_name} | Set: {s_name}", "#00ff00")
+
+        # Defect A: mark identification time for the unknown-mode warning.
+        self._ports_identified_at = time.monotonic()
+        self._unknown_mode_warned = False
+
+        # Defect A: poll for the settings/mode frame IMMEDIATELY on
+        # identification, rather than waiting the full 5 s cadence, so the
+        # startup window stored as "Unknown" is minimized.
+        self.poll_settings_frame()
 
         # We manually process the init buffer with the new handler logic
         self.handle_waveform(init_buffer)
@@ -1316,10 +1375,11 @@ class VentilatorWorker(QThread):
 
     @staticmethod
     def parse_settings_chunk(current_buffer: str, new_chunk: str, max_size: int = 8192) -> tuple[str, list[str]]:
-        """Parse a chunk of serial data from the PB980 settings port.
+        """Parse a chunk of serial data from the PB840/PB980 settings port.
 
-        The settings port sends CR-delimited CSV rows with 173+ fields.
-        This method extracts the ventilation mode string from fields 7-9.
+        The settings port sends CR-delimited CSV rows: 171 fields on a PB840,
+        173 on a PB980 (see ``MIN_SETTINGS_FIELDS``). This method extracts the
+        ventilation mode string from fields 7-9.
 
         Parameters
         ----------
@@ -1356,7 +1416,7 @@ class VentilatorWorker(QThread):
 
             try:
                 parts = clean.split(',')
-                if len(parts) >= 173:
+                if len(parts) >= MIN_SETTINGS_FIELDS:
                     mode = parts[7].strip()
                     mandatory = parts[8].strip()
                     spont = parts[9].strip()
