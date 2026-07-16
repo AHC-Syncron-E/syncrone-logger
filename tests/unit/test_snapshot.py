@@ -1,9 +1,18 @@
 import importlib.util
 import sqlite3
+from datetime import datetime, timedelta
 
 import pytest
 
 from main import SnapshotWorker
+
+# A realistic recent timestamp inside the 1-hour snapshot window. (Previously
+# these fixtures used the far-future sentinel "9999-12-31T23:59:59" as a
+# shortcut to beat the timestamp > now-1h cutoff; that only worked while the
+# EDF start date was hardcoded to now-1h. After the C2 fix the start date is
+# derived from the data, and edfio rejects dates outside 1985-2084, so the
+# fixtures must use a real recent timestamp.)
+RECENT_TS = (datetime.now() - timedelta(minutes=5)).isoformat()
 
 
 class TestSnapshotWorker:
@@ -53,7 +62,7 @@ class TestSnapshotWorker:
                          INSERT INTO waveforms
                          (timestamp, raw_data, parsed_pressure, parsed_flow, vent_mode, breath_index)
                          VALUES (?, ?, ?, ?, ?, ?)
-                         """, ("9999-12-31T23:59:59", "DATA", 20.0, 10.0, "VC-AC", 100))
+                         """, (RECENT_TS, "DATA", 20.0, 10.0, "VC-AC", 100))
 
         conn.commit()
         conn.close()
@@ -101,7 +110,7 @@ class TestSnapshotWorker:
                          INSERT INTO waveforms
                          (timestamp, raw_data, parsed_pressure, parsed_flow, vent_mode, breath_index)
                          VALUES (?, ?, ?, ?, ?, ?)
-                         """, ("9999-12-31T23:59:59", "DATA", 10, 10, "Mode", 1))
+                         """, (RECENT_TS, "DATA", 10, 10, "Mode", 1))
         conn.commit()
         conn.close()
 
