@@ -348,8 +348,17 @@ class DatabaseManager:
             self.conn.commit()
 
     def close(self) -> None:
-        """Close the database connection."""
+        """Flush any pending batch and close the database connection.
+
+        H1: sqlite3 opens an implicit transaction on the first INSERT, so
+        closing without committing would roll back the last uncommitted batch
+        (~1 s of samples) at session stop. Commit before closing.
+        """
         if self.conn:
+            try:
+                self.conn.commit()
+            except sqlite3.Error:
+                pass
             self.conn.close()
 
 
