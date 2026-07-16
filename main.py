@@ -118,6 +118,22 @@ def should_warn_unknown_mode(mode: str | None) -> bool:
     """
     return not mode or not mode.strip() or mode.strip() == "Unknown"
 
+
+def edf_availability_warning(has_edf_lib: bool) -> str | None:
+    """Return an operator-facing warning if the edfio library is unavailable.
+
+    H2: without edfio, ``SnapshotWorker`` silently produces zero EDF files.
+    This message is surfaced at startup (UI + error log) so the condition is
+    never silent. Returns None when edfio is present.
+    """
+    if not has_edf_lib:
+        return (
+            "CRITICAL: the 'edfio' library is not available. Recording will "
+            "still capture raw data, but NO EDF snapshot files will be "
+            "generated for analysis."
+        )
+    return None
+
 # -----------------------------------------------------------------------------
 # 0. HELPER UI CLASSES
 # -----------------------------------------------------------------------------
@@ -599,6 +615,16 @@ class SnapshotWorker(QThread):
         every ~2 minutes. Errors are logged to ``edf_error_log.txt``
         in the output folder rather than propagated.
         """
+        # H2: if edfio is missing, log it ONCE to the black-box error log so a
+        # snapshot-less session is not silent, then idle (no EDFs possible).
+        edf_warn = edf_availability_warning(HAS_EDF_LIB)
+        if edf_warn is not None:
+            try:
+                with open(self.output_folder / "edf_error_log.txt", "a") as f:
+                    f.write(f"[{datetime.now()}] {edf_warn}\n")
+            except OSError:
+                pass
+
         time.sleep(10)
         while self.is_running:
             # Wait ~2 minutes
@@ -1578,6 +1604,14 @@ class VentilatorApp(QMainWindow):
 
         if self.config_corrupt_msg:
             QTimer.singleShot(500, lambda: QMessageBox.warning(self, "Config Reset", self.config_corrupt_msg))
+
+        # H2: if edfio is unavailable, no EDF snapshots can be produced. Warn
+        # the operator at startup and record it in the error log rather than
+        # recording silently for hours with no output.
+        edf_warn = edf_availability_warning(HAS_EDF_LIB)
+        if edf_warn is not None:
+            self.log_debug(edf_warn)
+            QTimer.singleShot(600, lambda: QMessageBox.critical(self, "EDF Export Unavailable", edf_warn))
 
 
     def force_maintenance(self) -> None:
