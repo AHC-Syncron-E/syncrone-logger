@@ -579,6 +579,9 @@ class SnapshotWorker(QThread):
         self.output_folder = output_folder
         self.patient_id = patient_id
         self.is_running = True
+        # C1: path of THIS session's most recent snapshot, removed only after
+        # the next snapshot is written successfully. Never glob-delete others'.
+        self._last_written_path = None
 
     def run(self) -> None:
         """Execute the snapshot loop until stopped.
@@ -621,8 +624,9 @@ class SnapshotWorker(QThread):
         writes the result as an atomic temp-file-then-rename operation.
 
         The output file is named ``{PatientID}_{Timestamp}_1H.edf``.
-        Any existing ``.edf`` files in the output folder are removed
-        before the new file is written.
+        Only this session's own previous snapshot is removed, and only after
+        the new file is written successfully; other sessions'/patients' EDFs
+        in the folder are left untouched.
         """
         now_dt = datetime.now()
         cutoff = (now_dt - timedelta(hours=1)).isoformat()
@@ -786,19 +790,25 @@ class SnapshotWorker(QThread):
         final_path = self.output_folder / filename
         temp_path = self.output_folder / f"~temp_{filename}.tmp"
 
-        # Cleanup old files
-        for existing_file in self.output_folder.glob("*.edf"):
-            try:
-                os.remove(existing_file)
-            except OSError:
-                pass
-
+        # C1: Write-to-temp -> atomic rename -> only THEN remove this session's
+        # OWN previous snapshot. We never glob-delete the folder, so other
+        # sessions'/patients' EDFs are preserved, and a failed write never
+        # leaves us with zero EDFs.
         try:
             edf.write(str(temp_path))
             if temp_path.exists():
                 if final_path.exists():
                     os.remove(final_path)
                 os.rename(temp_path, final_path)
+
+                # New snapshot is safely on disk; retire the predecessor.
+                prev = self._last_written_path
+                if prev is not None and Path(prev) != final_path:
+                    try:
+                        os.remove(prev)
+                    except OSError:
+                        pass
+                self._last_written_path = final_path
         except Exception as e:
             try:
                 with open(self.output_folder / "edf_error_log.txt", "a") as f:
