@@ -33,3 +33,26 @@ def test_close_commits_pending_batch(tmp_path):
     conn.close()
 
     assert count == 2, "close() did not flush the pending batch (data loss)"
+
+
+def test_close_commit_failure_is_logged_not_swallowed(tmp_path, mocker):
+    """Fix 2: a failed final commit (e.g. disk full at stop) is the exact
+    data-loss H1 targets. It must be surfaced to the error log, not silently
+    swallowed by ``except sqlite3.Error: pass``."""
+    db_file = tmp_path / "close_fail.db"
+
+    mgr = main.DatabaseManager(str(db_file))
+    mgr.connect()
+
+    # Simulate the final commit failing (e.g. disk full).
+    mgr.conn = mocker.MagicMock()
+    mgr.conn.commit.side_effect = sqlite3.OperationalError("disk I/O error")
+
+    mgr.close()
+
+    log = db_file.parent / "db_error_log.txt"
+    assert log.exists(), "commit failure on close() was silently swallowed"
+    contents = log.read_text()
+    assert "disk I/O error" in contents
+    # The connection must still be closed despite the commit failure.
+    mgr.conn.close.assert_called_once()
