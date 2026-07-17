@@ -4,6 +4,20 @@ All notable changes to the Syncron-E Waveform Recorder will be documented in thi
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- **PB840 settings-frame parsing (PROVISIONAL — to be verified).** Accepts the shorter PB840 `MISCF` response to `SNDF` (assumed 171 fields, vs. 173 on the PB980) so the ventilation mode is logged instead of defaulting to `Unknown`. **Not yet validated against real PB840 hardware** — the field count and the mode/mandatory/spont field positions are assumed from protocol documentation. PB980 mode logging is unaffected. See the "PB840/PB980 Compatibility" section in the README.
+
+### Fixed
+- **EDF snapshot data loss (C1):** no longer glob-deletes every `*.edf` in the output folder; writes atomically (temp → rename) and removes only the session's own previous snapshot, after a successful write.
+- **EDF start time (C2):** derived from the first sample in the window instead of a hardcoded `now - 1h`, fixing misdated sub-hour captures.
+- **Data loss on stop (H1):** `DatabaseManager.close()` now commits the pending batch (and logs a failed final commit instead of silently swallowing it).
+- **Missing `edfio` (H2):** surfaced at startup instead of silently producing no EDF files.
+- **Repeated EDF export failures (H3):** now alert the UI after 3 consecutive failures instead of only logging to file.
+- **Settings-frame robustness:** require the `MISCF` header token before the field-count check, preventing a head-truncated frame (e.g. after a reconnect that flushes the input buffer mid-frame) from logging a scrambled ventilation mode on the PB980.
+- **Unknown-mode warning:** now clears on the first successfully parsed mode instead of remaining stuck on screen.
+
 ## [1.4.2] - 2026-04-06
 
 ### Changed
