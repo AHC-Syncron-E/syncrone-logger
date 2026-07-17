@@ -128,6 +128,17 @@ def should_warn_unknown_mode(mode: str | None) -> bool:
     return not mode or not mode.strip() or mode.strip() == "Unknown"
 
 
+def should_clear_unknown_warning(mode: str | None, warned: bool) -> bool:
+    """Return True when a previously-emitted unknown-mode warning should clear.
+
+    Fix 3: the 15 s unknown-mode warning otherwise stays on screen forever
+    even after a real mode arrives (late settings connector, slow vent). It
+    should clear on the FIRST known-mode parse. Pure so the transition is
+    unit-testable without Qt.
+    """
+    return warned and not should_warn_unknown_mode(mode)
+
+
 def edf_availability_warning(has_edf_lib: bool) -> str | None:
     """Return an operator-facing warning if the edfio library is unavailable.
 
@@ -1600,6 +1611,12 @@ class VentilatorWorker(QThread):
             # NEW: Update State for DB/EDF
             if "Mode:" in msg:
                 self.current_vent_mode = msg.replace("Mode:", "").strip()
+
+                # Fix 3: a real mode has arrived - clear any sticky
+                # unknown-mode warning and restore the normal status.
+                if should_clear_unknown_warning(self.current_vent_mode, self._unknown_mode_warned):
+                    self._unknown_mode_warned = False
+                    self.sig_status_update.emit("RECORDING", "#00ff00")
             self.sig_settings_msg.emit(msg)
 
     def log_crash(self, e: Exception) -> None:

@@ -10,7 +10,12 @@ genuinely short/truncated ones) and the pure unknown-mode-warning decision.
 
 from unittest.mock import MagicMock
 
-from main import MIN_SETTINGS_FIELDS, VentilatorWorker, should_warn_unknown_mode
+from main import (
+    MIN_SETTINGS_FIELDS,
+    VentilatorWorker,
+    should_clear_unknown_warning,
+    should_warn_unknown_mode,
+)
 
 
 def _make_frame(n_fields: int) -> str:
@@ -108,6 +113,24 @@ class TestUnknownModeWarning:
     def test_real_mode_does_not_warn(self):
         assert should_warn_unknown_mode("VC A/C") is False
         assert should_warn_unknown_mode("PS SPONT") is False
+
+
+class TestClearUnknownWarning:
+    """Fix 3: the sticky unknown-mode warning must clear on the FIRST
+    successful known-mode parse (operator attaches the settings connector
+    late, or the vent responds slowly)."""
+
+    def test_clears_when_mode_becomes_known_after_warning(self):
+        assert should_clear_unknown_warning("VC A/C", warned=True) is True
+
+    def test_does_not_clear_while_still_unknown(self):
+        assert should_clear_unknown_warning("Unknown", warned=True) is False
+        assert should_clear_unknown_warning("", warned=True) is False
+        assert should_clear_unknown_warning(None, warned=True) is False
+
+    def test_nothing_to_clear_if_never_warned(self):
+        assert should_clear_unknown_warning("VC A/C", warned=False) is False
+        assert should_clear_unknown_warning("Unknown", warned=False) is False
 
 
 class TestImmediateSettingsPoll:
