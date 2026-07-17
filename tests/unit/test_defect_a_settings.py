@@ -133,6 +133,30 @@ class TestClearUnknownWarning:
         assert should_clear_unknown_warning("Unknown", warned=False) is False
 
 
+class TestEventLogging:
+    """Fix 4: the 15 s unknown-mode notice was written via log_crash() OUTSIDE
+    any except block, so traceback.format_exc() appended a noisy
+    'NoneType: None'. A plain event log line must carry no traceback."""
+
+    def _worker(self, mocker, tmp_path):
+        mocker.patch("main.VentilatorWorker.setup_system")
+        mocker.patch("main.VentilatorWorker.open_log_files")
+        w = VentilatorWorker("TEST_LOG", "dummy.db")
+        w.logs_folder = tmp_path  # redirect away from the real Desktop folder
+        return w
+
+    def test_log_event_writes_message_without_traceback(self, mocker, tmp_path):
+        worker = self._worker(mocker, tmp_path)
+        worker.log_event("Ventilation mode still Unknown after 15s")
+
+        log = tmp_path / "error_log.txt"
+        assert log.exists()
+        contents = log.read_text()
+        assert "Ventilation mode still Unknown after 15s" in contents
+        assert "NoneType: None" not in contents
+        assert "Traceback" not in contents
+
+
 class TestImmediateSettingsPoll:
     """On port identification the worker must request a settings frame (SNDF)
     immediately, instead of waiting the full 5 s cadence, to minimise the
