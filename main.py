@@ -406,18 +406,30 @@ class DatabaseManager:
         if self.conn:
             self.conn.commit()
 
+    def _log_error(self, msg: str) -> None:
+        """Append a database error to a log file next to the DB file."""
+        try:
+            with open(self.db_path.parent / "db_error_log.txt", "a") as f:
+                f.write(f"[{datetime.now()}] {msg}\n")
+        except OSError:
+            pass
+
     def close(self) -> None:
         """Flush any pending batch and close the database connection.
 
         H1: sqlite3 opens an implicit transaction on the first INSERT, so
         closing without committing would roll back the last uncommitted batch
         (~1 s of samples) at session stop. Commit before closing.
+
+        Fix 2: a failed final commit (e.g. disk full at stop) is exactly the
+        data loss H1 targets, so it is LOGGED rather than silently swallowed.
+        The connection is still closed afterwards to release the file handle.
         """
         if self.conn:
             try:
                 self.conn.commit()
-            except sqlite3.Error:
-                pass
+            except sqlite3.Error as e:
+                self._log_error(f"Final commit on close() failed - data may be lost: {e}")
             self.conn.close()
 
 
