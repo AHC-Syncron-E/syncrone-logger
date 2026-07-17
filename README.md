@@ -128,6 +128,8 @@ The CSV format specification for Syncron-E input files is documented in the Sync
 
 Waveform fidelity validation was performed on the **PB980** ventilator. The PB840 uses a similar serial communication protocol with the same BS/BE breath-delimited ASCII waveform payload format at 50 Hz. PB840 compatibility is expected based on the shared serial protocol, and is supported by the successful use of PB840 serial port waveform data in published research (Adams et al., Scientific Reports, 2017;7:14980).
 
+> ⚠️ **Ventilation mode logging on PB840 — PROVISIONAL, TO BE VERIFIED.** The settings-frame parser accepts the PB840 `MISCF` response to `SNDF` (assumed **171** fields, vs. **173** on the PB980) so the ventilation mode is logged instead of defaulting to `Unknown`. **This PB840 settings-frame handling has NOT been validated against real PB840 hardware** — the field count and the mode/mandatory/spont field positions (token indices 7/8/9) are assumed from protocol documentation, and the vent's "field number" is not necessarily equal to the comma-split token count. If a real PB840 frame differs, the mode may still be logged as `Unknown` and an on-screen unknown-mode warning may appear each session. **PB980 mode logging is unaffected.** Confirm against a real PB840 capture before relying on PB840 mode logging clinically.
+
 ---
 
 ## Deployment & Installation
