@@ -105,6 +105,15 @@ APP_VERSION = "1.4.2"  # Bumped for Memory Fixes
 # still rejecting genuinely truncated/short frames. The mode lives in fields
 # 7/8/9, well within 171. (Defect A: the old >=173 guard silently rejected
 # every PB840 frame, pinning the mode to "Unknown" for the whole session.)
+#
+# WARNING - UNVERIFIED PB840 PREMISE: the "PB840 MISCF = 171 fields, mode at
+# 7/8/9" figure is ASSUMED and has NOT been validated against a real PB840
+# capture. Note that "field number" is not the same as comma-token count: the
+# reference PB980 payload (pb980_simulator_gui.py) splits into 178 tokens, not
+# 173. If a real PB840 frame splits into fewer than 171 tokens, it will be
+# rejected here and the 15 s unknown-mode warning will fire EVERY session on
+# that device. Re-validate this constant (and the field indices) against real
+# PB840 hardware before relying on PB840 support.
 MIN_SETTINGS_FIELDS = 171
 
 
@@ -1541,6 +1550,14 @@ class VentilatorWorker(QThread):
         for line in complete_lines:
             clean = line.strip()
             if not clean:
+                continue
+
+            # Require the MISCF frame header BEFORE the field-count check.
+            # A head-truncated frame (e.g. input buffer flushed mid-MISCF on
+            # reconnect) can still have 171-172 tokens and would otherwise pass
+            # the relaxed count guard and parse a SCRAMBLED mode. Every genuine
+            # frame starts with "MISCF"; no head-truncated line can.
+            if not clean.startswith("MISCF"):
                 continue
 
             try:

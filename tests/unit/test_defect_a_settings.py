@@ -28,6 +28,18 @@ def _make_frame(n_fields: int) -> str:
     return ",".join(fields) + "\r"
 
 
+def _head_truncated_frame(n_tokens: int) -> str:
+    """Build a HEAD-truncated settings line: the leading MISCF header token
+    has been lost (e.g. reconnect flushed the input buffer mid-frame), leaving
+    ``n_tokens`` comma-separated fields whose field[0] is NOT "MISCF".
+
+    Fields are labelled F0..F(n-1) so that, if such a line were wrongly parsed,
+    it would yield a scrambled mode string (e.g. "Mode: F8 F7").
+    """
+    fields = [f"F{i}" for i in range(n_tokens)]
+    return ",".join(fields) + "\r"
+
+
 class TestFieldCountGuard:
     def test_min_fields_constant_is_171(self):
         # PB840 frames contain 171 fields; this is the minimum accepted.
@@ -55,6 +67,31 @@ class TestFieldCountGuard:
     def test_short_packet_still_rejected(self):
         _buf, results = VentilatorWorker.parse_settings_chunk("", "MISCF,1,2,3\r")
         assert results == []
+
+
+class TestHeadTruncatedFrameRejected:
+    """PB980 regression: with the >=171 field guard, a HEAD-truncated frame
+    (MISCF header lost mid-frame) at 171-172 tokens would pass the count check
+    and parse a SCRAMBLED mode. The MISCF header token must be required first.
+    """
+
+    def test_172_token_head_truncated_rejected(self):
+        frame = _head_truncated_frame(172)
+        assert len(frame.rstrip("\r").split(",")) == 172  # would pass count guard
+        _buf, results = VentilatorWorker.parse_settings_chunk("", frame)
+        assert results == []
+
+    def test_171_token_head_truncated_rejected(self):
+        frame = _head_truncated_frame(171)
+        assert len(frame.rstrip("\r").split(",")) == 171
+        _buf, results = VentilatorWorker.parse_settings_chunk("", frame)
+        assert results == []
+
+    def test_head_truncated_never_yields_scrambled_mode(self):
+        # No "Mode:" string of any kind may be produced from a header-less line.
+        for n in (171, 172, 177):
+            _buf, results = VentilatorWorker.parse_settings_chunk("", _head_truncated_frame(n))
+            assert not any("Mode:" in r for r in results), f"scrambled mode from {n}-token frame: {results}"
 
 
 class TestUnknownModeWarning:
