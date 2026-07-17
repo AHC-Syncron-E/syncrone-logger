@@ -1309,11 +1309,9 @@ class VentilatorWorker(QThread):
                             "WARNING: ventilation mode UNKNOWN (check settings cable)",
                             "#ffa500",
                         )
-                        self.log_crash(
-                            RuntimeError(
-                                "Ventilation mode still 'Unknown' 15s after port "
-                                "identification; settings frames are not parsing."
-                            )
+                        self.log_event(
+                            "WARNING: ventilation mode still 'Unknown' 15s after "
+                            "port identification; settings frames are not parsing."
                         )
 
                     sleep_duration = next_wake - time.monotonic()
@@ -1620,10 +1618,27 @@ class VentilatorWorker(QThread):
             self.sig_settings_msg.emit(msg)
 
     def log_crash(self, e: Exception) -> None:
-        """Log exception details to error log."""
+        """Log exception details (with traceback) to error log.
+
+        Only call this from WITHIN an ``except`` block; ``traceback.format_exc``
+        returns ``"NoneType: None"`` otherwise. For non-exception events use
+        :meth:`log_event`.
+        """
         try:
             with open(self.logs_folder / "error_log.txt", "a") as f:
                 f.write(f"\n[CRASH {datetime.now()}] {e!s}\n{traceback.format_exc()}\n")
+        except OSError:
+            pass
+
+    def log_event(self, msg: str) -> None:
+        """Log a plain informational event (no traceback) to the error log.
+
+        Fix 4: used for notices raised outside any ``except`` block (e.g. the
+        unknown-mode warning), which must not drag in a spurious traceback.
+        """
+        try:
+            with open(self.logs_folder / "error_log.txt", "a") as f:
+                f.write(f"[{datetime.now()}] {msg}\n")
         except OSError:
             pass
 
